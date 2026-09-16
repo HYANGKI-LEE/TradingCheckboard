@@ -36,6 +36,45 @@ def _with_ma(series: pd.Series) -> dict:
     return {f"MA{w}": series.rolling(window=w, min_periods=w).mean() for w in MA_WINDOWS}
 
 
+PERIOD_PRESETS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "10Y", "MTD", "QTD", "YTD", "MAX", "설정"]
+
+
+def _preset_to_start(preset: str, min_date, max_date):
+    if preset == "MTD":
+        start = max_date.replace(day=1)
+    elif preset == "QTD":
+        q_start_month = (max_date.month - 1) // 3 * 3 + 1
+        start = max_date.replace(month=q_start_month, day=1)
+    elif preset == "YTD":
+        start = max_date.replace(month=1, day=1)
+    elif preset == "MAX":
+        start = min_date
+    else:
+        n = int(preset[:-1])
+        offset = pd.DateOffset(months=n) if preset.endswith("M") else pd.DateOffset(years=n)
+        start = (pd.Timestamp(max_date) - offset).date()
+    return max(start, min_date)
+
+
+def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y"):
+    """기간 프리셋(1M~10Y, MTD/QTD/YTD/MAX) + 직접설정(캘린더) 선택 위젯. (시작일, 종료일) 반환."""
+    preset = st.segmented_control(
+        "기간", PERIOD_PRESETS, default=default, key=f"{key_prefix}_period",
+    ) or default
+
+    if preset == "설정":
+        custom_default_start = _preset_to_start(default, min_date, max_date)
+        custom_range = st.date_input(
+            "직접 설정", value=(custom_default_start, max_date),
+            min_value=min_date, max_value=max_date, key=f"{key_prefix}_custom_range",
+        )
+        if isinstance(custom_range, tuple) and len(custom_range) == 2:
+            return custom_range
+        return custom_default_start, max_date
+
+    return _preset_to_start(preset, min_date, max_date), max_date
+
+
 def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, key: str):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=name, line=dict(width=2)))
@@ -53,17 +92,7 @@ def page_domestic_rate():
 
     govt_dates = df.loc[df["그룹"] == "국고채", "날짜"]
     min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
-    default_start = (pd.Timestamp(max_date) - pd.DateOffset(years=5)).date()
-    default_start = max(default_start, min_date)
-
-    date_range = st.date_input(
-        "기간", value=(default_start, max_date), min_value=min_date, max_value=max_date,
-        key="domestic_date_range",
-    )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date, end_date = default_start, max_date
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="5Y")
 
     tab_rates, tab_spread = st.tabs(["Rates", "스프레드"])
 
