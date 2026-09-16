@@ -27,49 +27,45 @@ CURVE_TENORS = ["1Y", "2Y", "3Y", "4Y", "5Y", "10Y", "20Y", "30Y"]
 IRS_TENORS = [t for t in df.loc[df["그룹"] == "IRS", "만기"].dropna().unique()]
 IRS_TENORS = sorted(IRS_TENORS, key=lambda t: (float(t[:-1]) if t.endswith("M") else float(t[:-1]) * 12))
 
+DOMESTIC_TENORS = ["2Y", "3Y", "5Y", "10Y", "20Y", "30Y"]
+MA_WINDOWS = [20, 60, 120, 200]
 
-# ================================================================ 국고채/통안채
-def page_govt():
-    st.title("🏛️ 국고채 / 통안채")
 
-    base_group = st.segmented_control("커브 선택", ["국고채", "통안채"], default="국고채", key="govt_group")
-    base_group = base_group or "국고채"
-    latest = latest_curve(df, base_group)
-    latest_date = latest["날짜"].max()
+# ================================================================ 국내금리
+def page_domestic_rate():
+    st.title("🏛️ 국내금리")
 
-    col1, col2 = st.columns([2, 1])
+    govt_dates = df.loc[df["그룹"] == "국고채", "날짜"]
+    min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
+    default_start = (pd.Timestamp(max_date) - pd.DateOffset(years=5)).date()
+    default_start = max(default_start, min_date)
 
-    with col1:
-        st.subheader(f"{base_group} 금리커브 ({latest_date:%Y-%m-%d})")
+    date_range = st.date_input(
+        "기간", value=(default_start, max_date), min_value=min_date, max_value=max_date,
+        key="domestic_date_range",
+    )
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = date_range
+    else:
+        start_date, end_date = default_start, max_date
 
-        all_dates = sorted(df.loc[df["그룹"] == base_group, "날짜"].unique(), reverse=True)
-        compare_dates = st.multiselect(
-            "비교할 날짜 추가 (커브 겹쳐보기)", options=all_dates, default=[],
-            format_func=lambda d: pd.Timestamp(d).strftime("%Y-%m-%d"), key="govt_compare_dates",
-        )
+    cols = st.columns(2)
+    for i, tenor in enumerate(DOMESTIC_TENORS):
+        hist = curve_history(df, "국고채", tenor).copy()
+        for w in MA_WINDOWS:
+            hist[f"MA{w}"] = hist["값"].rolling(window=w, min_periods=w).mean()
+        view = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=latest["만기"], y=latest["값"], mode="lines+markers",
-                                  name=f"{latest_date:%Y-%m-%d}", line=dict(width=3)))
-        for d in compare_dates:
-            snap = df[(df["그룹"] == base_group) & (df["날짜"] == d)].sort_values("만기")
-            fig.add_trace(go.Scatter(x=snap["만기"], y=snap["값"], mode="lines+markers",
-                                      name=f"{pd.Timestamp(d):%Y-%m-%d}", line=dict(dash="dot")))
-        fig.update_layout(xaxis_title="만기", yaxis_title="금리 (%)", height=480,
-                           legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("만기별 히스토리")
-        tenor = st.selectbox("만기 선택", CURVE_TENORS, index=CURVE_TENORS.index("3Y"), key="govt_tenor")
-        hist = curve_history(df, base_group, tenor)
-        fig2 = px.line(hist, x="날짜", y="값")
-        fig2.update_layout(height=430, yaxis_title="금리 (%)", margin=dict(t=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("금리 데이터 테이블 (최근 스냅샷)")
-    st.dataframe(latest[["만기", "값"]].rename(columns={"값": "금리(%)"}).reset_index(drop=True),
-                 use_container_width=True)
+        fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines",
+                                  name=f"국고채 {tenor}", line=dict(width=2)))
+        for w in MA_WINDOWS:
+            fig.add_trace(go.Scatter(x=view["날짜"], y=view[f"MA{w}"], mode="lines",
+                                      name=f"MA{w}", line=dict(width=1, dash="dot")))
+        fig.update_layout(title=f"국고채 {tenor}", height=360, yaxis_title="금리 (%)",
+                           legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
+        with cols[i % 2]:
+            st.plotly_chart(fig, use_container_width=True, key=f"domestic_{tenor}")
 
 
 # ================================================================ 신용스프레드
@@ -214,7 +210,7 @@ def page_short():
 
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
-    st.Page(page_govt, title="국고채/통안채", icon="🏛️", default=True),
+    st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
     st.Page(page_credit, title="신용스프레드", icon="🏦"),
     st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
     st.Page(page_short, title="단기금리", icon="📉"),
