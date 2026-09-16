@@ -39,6 +39,7 @@ EXCEL_PATH = DATA_DIR / "RawData.xlsx"
 SHEET_DAILY = "Info(국내금리)"
 SHEET_SHORT = "Info(단기금리)"
 SHEET_FOREIGN = "Info(해외금리)"
+SHEET_FX = "Info(FX)"
 
 FOREIGN_COUNTRIES_ORDER = [
     "미국", "독일", "영국", "프랑스", "이탈리아", "일본", "호주", "캐나다",
@@ -53,6 +54,7 @@ TENOR_ORDER = [
 # 국고채/통안채/신용채권 커브 블록 제목에서 상품명만 뽑기 위한 접두/치환 규칙
 _CURVE_PREFIX = "시가평가 4사평균 "
 _IRS_PREFIX = "원화 IRS 종합코드 "
+_FX_CROSS_PREFIX = "이종통화 종합 "
 _GROUP_RENAME = {"국고채권": "국고채", "통안증권": "통안채"}
 
 CREDIT_GROUPS_ORDER = [
@@ -109,6 +111,17 @@ def _block_to_group_tenor(title: str, sub) -> tuple[str, str] | None:
         return ("CD", "91D")
     if title == "한국:기준금리":
         return ("기준금리", None)
+    # FX 시트: 환율은 만기 개념이 없는 단일 시계열이라 만기=None
+    if title.startswith("달러인덱스"):
+        return ("달러인덱스", None)
+    if "USDKRW 스팟" in title:
+        if title.startswith("서울외환"):
+            return ("KRW", None)
+        if title.startswith("TP NDF"):
+            return ("NDF", None)
+    if title.startswith(_FX_CROSS_PREFIX):
+        code = title[len(_FX_CROSS_PREFIX):].strip()
+        return (code, None) if code else None
     # 해외금리 시트: "{국가}(종합)? {N}년" 형태 (예: "미국(종합) 2년", "독일 10년")
     stripped = title.replace("(종합)", "").strip()
     if " " in stripped and stripped.rsplit(" ", 1)[-1].endswith("년"):
@@ -168,10 +181,11 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
         df_daily = _parse_sheet(wb[SHEET_DAILY]) if SHEET_DAILY in wb.sheetnames else pd.DataFrame()
         df_short = _parse_sheet(wb[SHEET_SHORT]) if SHEET_SHORT in wb.sheetnames else pd.DataFrame()
         df_foreign = _parse_sheet(wb[SHEET_FOREIGN]) if SHEET_FOREIGN in wb.sheetnames else pd.DataFrame()
+        df_fx = _parse_sheet(wb[SHEET_FX]) if SHEET_FX in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
-    df = pd.concat([df_daily, df_short, df_foreign], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
+    df = pd.concat([df_daily, df_short, df_foreign, df_fx], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
     tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \
                 [t for t in df["만기"].dropna().unique() if t not in TENOR_ORDER]

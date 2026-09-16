@@ -148,6 +148,17 @@ CROSS_COUNTRY_SPREADS = [
     ("영국", "독일"), ("이탈리아", "독일"), ("한국", "호주"),
 ]
 
+COUNTRY_FLAGS = {
+    "한국": "🇰🇷", "미국": "🇺🇸", "독일": "🇩🇪", "영국": "🇬🇧", "프랑스": "🇫🇷",
+    "이탈리아": "🇮🇹", "일본": "🇯🇵", "호주": "🇦🇺", "캐나다": "🇨🇦", "인도": "🇮🇳",
+    "인도네시아": "🇮🇩", "브라질": "🇧🇷", "멕시코": "🇲🇽", "남아공": "🇿🇦",
+}
+
+
+def _chart_gap():
+    st.write("")
+    st.write("")
+
 
 def _foreign_group_key(display_name: str) -> str:
     return "국고채" if display_name == "한국" else display_name
@@ -170,13 +181,15 @@ def page_foreign_rate():
             target = [t for t in target if t in available]
             if not target:
                 continue
-            st.subheader(country)
+            flag = COUNTRY_FLAGS.get(country, "")
+            st.subheader(f"{flag} {country}")
             cols = st.columns(3)
             for i, tenor in enumerate(target):
                 view = _tenor_history_view(country, tenor, start_date, end_date)
                 with cols[i]:
-                    _plot_with_ma(view, f"{country} {tenor}", "금리 (%)", f"{country} {tenor}",
+                    _plot_with_ma(view, f"{flag} {country} {tenor}", "금리 (%)", f"{country} {tenor}",
                                   key=f"foreign_rate_{country}_{tenor}")
+            _chart_gap()
 
     with tab_spread_period:
         cols2 = st.columns(3)
@@ -187,19 +200,75 @@ def page_foreign_rate():
             if short_t is None or "10Y" not in available:
                 continue
             view = _tenor_spread_view(country, "10Y", short_t, start_date, end_date)
+            flag = COUNTRY_FLAGS.get(country, "")
             label = f"10Y-{short_t}"
             with cols2[idx % 3]:
-                _plot_with_ma(view, f"{country} {label}", "bp", f"{country} {label}",
+                _plot_with_ma(view, f"{flag} {country} {label}", "bp", f"{country} {label}",
                               key=f"foreign_spread_{country}")
             idx += 1
+            if idx % 3 == 0:
+                _chart_gap()
 
     with tab_spread_country:
         cols3 = st.columns(3)
         for i, (a, b) in enumerate(CROSS_COUNTRY_SPREADS):
             view = _cross_group_spread_view(_foreign_group_key(a), _foreign_group_key(b), "10Y", start_date, end_date)
+            flag_a, flag_b = COUNTRY_FLAGS.get(a, ""), COUNTRY_FLAGS.get(b, "")
             label = f"{a}-{b}"
             with cols3[i % 3]:
-                _plot_with_ma(view, f"{label} (10Y)", "bp", label, key=f"cross_spread_{label}")
+                _plot_with_ma(view, f"{flag_a}{a}-{flag_b}{b} (10Y)", "bp", label, key=f"cross_spread_{label}")
+
+
+FX_FLAGS = {
+    "KRW": "🇰🇷", "NDF": "🇰🇷", "달러인덱스": "💵", "JPY": "🇯🇵", "EUR": "🇪🇺", "GBP": "🇬🇧",
+    "EURCHF": "🇪🇺🇨🇭", "EURGBP": "🇪🇺🇬🇧", "CHF": "🇨🇭", "AUD": "🇦🇺", "AUDNZD": "🇦🇺🇳🇿", "AUDCAD": "🇦🇺🇨🇦",
+    "CNY": "🇨🇳", "BRL": "🇧🇷", "INR": "🇮🇳", "IDR": "🇮🇩", "ZAR": "🇿🇦", "TRY": "🇹🇷", "MXN": "🇲🇽", "RUB": "🇷🇺",
+    "BRLKRW": "🇧🇷🇰🇷", "MXNKRW": "🇲🇽🇰🇷", "INRKRW": "🇮🇳🇰🇷", "IDRKRW": "🇮🇩🇰🇷",
+}
+
+# (표시 그룹, KRW와의 크로스로 직접 계산해야 하는지 여부)
+FX_ORDER = [
+    ("KRW", False), ("NDF", False), ("달러인덱스", False), ("JPY", False), ("EUR", False), ("GBP", False),
+    ("EURCHF", False), ("EURGBP", False), ("CHF", False), ("AUD", False), ("AUDNZD", False), ("AUDCAD", False),
+    ("CNY", False), ("BRL", False), ("INR", False), ("IDR", False), ("ZAR", False), ("TRY", False),
+    ("MXN", False), ("RUB", False),
+    ("BRLKRW", True), ("MXNKRW", True), ("INRKRW", True), ("IDRKRW", True),
+]
+
+
+def _fx_history_view(group: str, start_date, end_date) -> pd.DataFrame:
+    hist = df[df["그룹"] == group][["날짜", "값"]].sort_values("날짜").copy()
+    hist = hist.assign(**_with_ma(hist["값"]))
+    return hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+
+
+def _fx_cross_krw_view(ccy_group: str, start_date, end_date) -> pd.DataFrame:
+    """KRW 환율 / 해당 통화(USD 대비) 환율로 계산하는 교차환율 (예: BRLKRW = USDKRW / USDBRL)."""
+    krw = df[df["그룹"] == "KRW"][["날짜", "값"]].rename(columns={"값": "usdkrw"})
+    ccy = df[df["그룹"] == ccy_group.replace("KRW", "")][["날짜", "값"]].rename(columns={"값": "usdccy"})
+    merged = krw.merge(ccy, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = merged["usdkrw"] / merged["usdccy"]
+    merged = merged.assign(**_with_ma(merged["값"]))
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+# ================================================================ FX
+def page_fx():
+    st.title("💱 FX")
+
+    fx_groups = [g for g, is_cross in FX_ORDER if not is_cross]
+    fx_dates = df.loc[df["그룹"].isin(fx_groups), "날짜"]
+    min_date, max_date = fx_dates.min().date(), fx_dates.max().date()
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="5Y")
+
+    cols = st.columns(3)
+    for i, (group, is_cross) in enumerate(FX_ORDER):
+        view = _fx_cross_krw_view(group, start_date, end_date) if is_cross else _fx_history_view(group, start_date, end_date)
+        flag = FX_FLAGS.get(group, "")
+        with cols[i % 3]:
+            _plot_with_ma(view, f"{flag} {group}", "환율", f"{flag} {group}", key=f"fx_{group}")
+        if (i + 1) % 3 == 0:
+            _chart_gap()
 
 
 # ================================================================ 신용스프레드
@@ -346,6 +415,7 @@ def page_short():
 nav = st.navigation([
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
+    st.Page(page_fx, title="FX", icon="💱"),
     st.Page(page_credit, title="신용스프레드", icon="🏦"),
     st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
     st.Page(page_short, title="단기금리", icon="📉"),
