@@ -27,8 +27,24 @@ CURVE_TENORS = ["1Y", "2Y", "3Y", "4Y", "5Y", "10Y", "20Y", "30Y"]
 IRS_TENORS = [t for t in df.loc[df["그룹"] == "IRS", "만기"].dropna().unique()]
 IRS_TENORS = sorted(IRS_TENORS, key=lambda t: (float(t[:-1]) if t.endswith("M") else float(t[:-1]) * 12))
 
-DOMESTIC_TENORS = ["2Y", "3Y", "5Y", "10Y", "20Y", "30Y"]
+DOMESTIC_RATE_TENORS = ["2Y", "3Y", "10Y", "30Y"]
+DOMESTIC_SPREADS = [("3Y", "1Y"), ("5Y", "3Y"), ("10Y", "3Y"), ("30Y", "10Y")]
 MA_WINDOWS = [20, 60, 120, 200]
+
+
+def _with_ma(series: pd.Series) -> dict:
+    return {f"MA{w}": series.rolling(window=w, min_periods=w).mean() for w in MA_WINDOWS}
+
+
+def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, key: str):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=name, line=dict(width=2)))
+    for w in MA_WINDOWS:
+        fig.add_trace(go.Scatter(x=view["날짜"], y=view[f"MA{w}"], mode="lines",
+                                  name=f"MA{w}", line=dict(width=1, dash="dot")))
+    fig.update_layout(title=title, height=360, yaxis_title=yaxis_title,
+                       legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 # ================================================================ 국내금리
@@ -49,23 +65,29 @@ def page_domestic_rate():
     else:
         start_date, end_date = default_start, max_date
 
-    cols = st.columns(2)
-    for i, tenor in enumerate(DOMESTIC_TENORS):
-        hist = curve_history(df, "국고채", tenor).copy()
-        for w in MA_WINDOWS:
-            hist[f"MA{w}"] = hist["값"].rolling(window=w, min_periods=w).mean()
-        view = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+    tab_rates, tab_spread = st.tabs(["Rates", "스프레드"])
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines",
-                                  name=f"국고채 {tenor}", line=dict(width=2)))
-        for w in MA_WINDOWS:
-            fig.add_trace(go.Scatter(x=view["날짜"], y=view[f"MA{w}"], mode="lines",
-                                      name=f"MA{w}", line=dict(width=1, dash="dot")))
-        fig.update_layout(title=f"국고채 {tenor}", height=360, yaxis_title="금리 (%)",
-                           legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
-        with cols[i % 2]:
-            st.plotly_chart(fig, use_container_width=True, key=f"domestic_{tenor}")
+    with tab_rates:
+        cols = st.columns(2)
+        for i, tenor in enumerate(DOMESTIC_RATE_TENORS):
+            hist = curve_history(df, "국고채", tenor).copy()
+            hist = hist.assign(**_with_ma(hist["값"]))
+            view = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+            with cols[i % 2]:
+                _plot_with_ma(view, f"국고채 {tenor}", "금리 (%)", f"국고채 {tenor}", key=f"rate_{tenor}")
+
+    with tab_spread:
+        cols2 = st.columns(2)
+        for i, (long_t, short_t) in enumerate(DOMESTIC_SPREADS):
+            a = curve_history(df, "국고채", long_t)[["날짜", "값"]].rename(columns={"값": "장기"})
+            b = curve_history(df, "국고채", short_t)[["날짜", "값"]].rename(columns={"값": "단기"})
+            merged = a.merge(b, on="날짜", how="inner").sort_values("날짜")
+            merged["값"] = (merged["장기"] - merged["단기"]) * 100
+            merged = merged.assign(**_with_ma(merged["값"]))
+            view = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+            label = f"{long_t}-{short_t}"
+            with cols2[i % 2]:
+                _plot_with_ma(view, f"국고채 {label} 스프레드", "bp", label, key=f"spread_{label}")
 
 
 # ================================================================ 신용스프레드
