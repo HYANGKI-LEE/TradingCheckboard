@@ -75,12 +75,16 @@ def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y"):
     return _preset_to_start(preset, min_date, max_date), max_date
 
 
+MA_COLORS = {20: "#E67E22", 60: "#27AE60", 120: "#2980B9", 200: "#8E44AD"}
+
+
 def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, key: str):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=name, line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=name,
+                              line=dict(width=3, color="black")))
     for w in MA_WINDOWS:
         fig.add_trace(go.Scatter(x=view["날짜"], y=view[f"MA{w}"], mode="lines",
-                                  name=f"MA{w}", line=dict(width=1, dash="dot")))
+                                  name=f"MA{w}", line=dict(width=1.5, color=MA_COLORS[w])))
     fig.update_layout(title=title, height=360, yaxis_title=yaxis_title,
                        legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
     st.plotly_chart(fig, use_container_width=True, key=key)
