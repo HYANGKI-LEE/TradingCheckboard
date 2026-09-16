@@ -16,6 +16,12 @@ data/RawData.xlsx 는 인포맥스 IMDH 함수로 뽑은 일별 히스토리 원
 
 이 모듈은 컬럼 위치를 하드코딩하지 않고 row2/row3 를 스캔해서 블록을 자동으로 찾는다 -
 인포맥스에서 커브를 추가/삭제해도 구조만 유지되면 그대로 동작한다.
+
+성능: row1 F열("Data 개수")을 크게 잡으면(예: 99999) A열 날짜가 시작일부터 쭉 몇만 행 채워지고
+실데이터는 그 중간 어딘가에만 있어서 "위에서 N행만" 식으로는 못 자른다 - 그냥 전체를 순차로
+훑되(read_only + iter_rows(values_only=True), cell() 랜덤 접근 없음), 실제 값이 있는 행만
+결과에 담는다. 9MB 파일 기준 5~6초 정도라 매 위젯 조작마다 다시 돌면 안 되므로
+load_raw_data() 는 파일 mtime 을 키로 st.cache_data 캐싱한다 - 파일이 안 바뀌면 재파싱 안 함.
 """
 
 from __future__ import annotations
@@ -25,11 +31,12 @@ from pathlib import Path
 
 import openpyxl
 import pandas as pd
+import streamlit as st
 
 DATA_DIR = Path(__file__).parent / "data"
 EXCEL_PATH = DATA_DIR / "RawData.xlsx"
 
-SHEET_DAILY = "Info(일)"
+SHEET_DAILY = "Info(국내금리)"
 SHEET_SHORT = "Info(단기금리)"
 
 TENOR_ORDER = [
@@ -67,21 +74,21 @@ def _normalize_tenor(label: str) -> str | None:
     return None
 
 
-def _find_blocks(ws_formula, ws_value) -> list[tuple[int, int, str]]:
+def _find_blocks(row2: tuple) -> list[tuple[int, int, str]]:
     """
-    row2 를 스캔해서 (시작컬럼, 끝컬럼, 블록제목) 리스트 반환.
-    블록 제목 셀은 항상 IMDH 수식이다 ('=' 로 시작) - "단위: %" 같은 순수 텍스트 주석은
-    수식이 아니므로 블록 시작으로 오인하지 않는다.
+    row2(0-based 튜플) 를 스캔해서 (시작컬럼, 끝컬럼, 블록제목) 리스트 반환.
+    블록 제목 셀은 항상 IMDH 수식의 계산 결과(상품명)이고, "단위: %" 같은 순수
+    텍스트 주석은 "단위"로 시작하므로 블록 시작으로 오인하지 않는다.
     """
     starts = [
-        c for c in range(1, ws_formula.max_column + 1)
-        if isinstance(ws_formula.cell(row=2, column=c).value, str) and ws_formula.cell(row=2, column=c).value.startswith("=")
+        c for c, v in enumerate(row2)
+        if isinstance(v, str) and v.strip() and not v.strip().startswith("단위")
     ]
-    starts.append(ws_formula.max_column + 1)
-    return [(starts[i], starts[i + 1] - 1, ws_value.cell(row=2, column=starts[i]).value) for i in range(len(starts) - 1)]
+    starts.append(len(row2))
+    return [(starts[i], starts[i + 1] - 1, row2[starts[i]]) for i in range(len(starts) - 1)]
 
 
-def _block_to_group_tenor(title: str, sub: str) -> tuple[str, str] | None:
+def _block_to_group_tenor(title: str, sub) -> tuple[str, str] | None:
     title = (title or "").strip()
     if title.startswith(_CURVE_PREFIX):
         name = title[len(_CURVE_PREFIX):].replace("(공모/무보증)", "")
@@ -99,39 +106,51 @@ def _block_to_group_tenor(title: str, sub: str) -> tuple[str, str] | None:
     return None
 
 
-def _parse_sheet(ws_formula, ws_value) -> pd.DataFrame:
-    ws = ws_value
-    rows = []
-    for start, end, title in _find_blocks(ws_formula, ws_value):
+_HARD_ROW_CAP = 200_000  # 절대적인 안전장치 - 정상 시나리오에서는 도달하지 않음
+
+
+def _parse_sheet(ws) -> pd.DataFrame:
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        next(rows_iter)  # row1 (설정값 - "Data 개수" 등, 신뢰하지 않고 실제 값 유무로 판단)
+        row2 = next(rows_iter)
+        row3 = next(rows_iter)
+    except StopIteration:
+        return pd.DataFrame(columns=["날짜", "그룹", "만기", "값"])
+
+    col_map: dict[int, tuple[str, str]] = {}
+    for start, end, title in _find_blocks(row2):
         for c in range(start, end + 1):
-            if c == 1:
+            if c == 0:
                 continue  # A열은 날짜 칼럼이라 데이터로 취급하지 않음
-            sub = ws.cell(row=3, column=c).value
+            sub = row3[c] if c < len(row3) else None
             mapped = _block_to_group_tenor(title, sub)
-            if mapped is None:
+            if mapped is not None:
+                col_map[c] = mapped
+
+    rows = []
+    for i, r in enumerate(rows_iter):
+        if i >= _HARD_ROW_CAP:
+            break
+        date = r[0] if len(r) > 0 else None
+        if date is None:
+            continue  # 실데이터가 맨 위부터 연속이라는 보장이 없어서 건너뛰기만 함
+        for c, (group, tenor) in col_map.items():
+            val = r[c] if c < len(r) else None
+            if val in (None, "", 0):
                 continue
-            group, tenor = mapped
-            for r in range(4, ws.max_row + 1):
-                date = ws.cell(row=r, column=1).value
-                val = ws.cell(row=r, column=c).value
-                if date is None or val in (None, "", 0):
-                    continue
-                rows.append({"날짜": date, "그룹": group, "만기": tenor, "값": val})
+            rows.append({"날짜": date, "그룹": group, "만기": tenor, "값": val})
     return pd.DataFrame(rows)
 
 
-def load_raw_data() -> tuple[pd.DataFrame, bool]:
-    """
-    (long-format DataFrame [날짜, 그룹, 만기, 값], is_sample) 반환.
-    RawData.xlsx 가 없으면 빈 데이터프레임 + is_sample=True.
-    """
-    if not EXCEL_PATH.exists():
-        return pd.DataFrame(columns=["날짜", "그룹", "만기", "값"]), True
-
-    wb_v = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
-    wb_f = openpyxl.load_workbook(EXCEL_PATH, data_only=False)
-    df_daily = _parse_sheet(wb_f[SHEET_DAILY], wb_v[SHEET_DAILY]) if SHEET_DAILY in wb_v.sheetnames else pd.DataFrame()
-    df_short = _parse_sheet(wb_f[SHEET_SHORT], wb_v[SHEET_SHORT]) if SHEET_SHORT in wb_v.sheetnames else pd.DataFrame()
+@st.cache_data(show_spinner="RawData.xlsx 불러오는 중...")
+def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
+    wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True, read_only=True)
+    try:
+        df_daily = _parse_sheet(wb[SHEET_DAILY]) if SHEET_DAILY in wb.sheetnames else pd.DataFrame()
+        df_short = _parse_sheet(wb[SHEET_SHORT]) if SHEET_SHORT in wb.sheetnames else pd.DataFrame()
+    finally:
+        wb.close()
 
     df = pd.concat([df_daily, df_short], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
@@ -139,6 +158,17 @@ def load_raw_data() -> tuple[pd.DataFrame, bool]:
                 [t for t in df["만기"].dropna().unique() if t not in TENOR_ORDER]
     df["만기"] = pd.Categorical(df["만기"], categories=tenor_cat, ordered=True)
     return df.sort_values(["그룹", "날짜", "만기"]).reset_index(drop=True), False
+
+
+def load_raw_data() -> tuple[pd.DataFrame, bool]:
+    """
+    (long-format DataFrame [날짜, 그룹, 만기, 값], is_sample) 반환.
+    RawData.xlsx 가 없으면 빈 데이터프레임 + is_sample=True.
+    파일이 바뀌지 않는 한(mtime 기준) 캐시된 결과를 재사용한다.
+    """
+    if not EXCEL_PATH.exists():
+        return pd.DataFrame(columns=["날짜", "그룹", "만기", "값"]), True
+    return _load_raw_data_cached(EXCEL_PATH.stat().st_mtime)
 
 
 def latest_curve(df: pd.DataFrame, group: str) -> pd.DataFrame:
