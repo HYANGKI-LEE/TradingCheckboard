@@ -6,6 +6,7 @@ import streamlit as st
 from data_loader import (
     CREDIT_GROUPS_ORDER,
     FOREIGN_COUNTRIES_ORDER,
+    COMMODITY_ORDER,
     load_raw_data,
     latest_curve,
     curve_history,
@@ -236,7 +237,7 @@ FX_ORDER = [
 ]
 
 
-def _fx_history_view(group: str, start_date, end_date) -> pd.DataFrame:
+def _series_history_view(group: str, start_date, end_date) -> pd.DataFrame:
     hist = df[df["그룹"] == group][["날짜", "값"]].sort_values("날짜").copy()
     hist = hist.assign(**_with_ma(hist["값"]))
     return hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
@@ -263,10 +264,41 @@ def page_fx():
 
     cols = st.columns(3)
     for i, (group, is_cross) in enumerate(FX_ORDER):
-        view = _fx_cross_krw_view(group, start_date, end_date) if is_cross else _fx_history_view(group, start_date, end_date)
+        view = _fx_cross_krw_view(group, start_date, end_date) if is_cross else _series_history_view(group, start_date, end_date)
         flag = FX_FLAGS.get(group, "")
         with cols[i % 3]:
             _plot_with_ma(view, f"{flag} {group}", "환율", f"{flag} {group}", key=f"fx_{group}")
+        if (i + 1) % 3 == 0:
+            _chart_gap()
+
+
+COMMODITY_EMOJI = {
+    "WTI": "🛢️", "브렌트": "🛢️", "두바이유": "🛢️", "천연가스": "🔥", "팔라듐": "⚪", "백금": "⚪",
+    "블룸버그 상품 지수": "📊", "에탄올": "⛽", "KC HRW 밀": "🌾", "다우 존스 부동산": "🏠",
+    "미니 옥수수": "🌽", "미니 콩": "🫘", "미니 소맥": "🌾", "옥수수": "🌽", "대두유": "🛢️",
+    "대두박": "🌱", "귀리": "🌾", "30 DAY FEDERAL FUNDS": "💵", "쌀": "🍚", "대두": "🫘",
+    "시카고 SRW 밀": "🌾", "버터": "🧈", "치즈": "🧀", "3등급 우유": "🥛", "4등급 우유": "🥛",
+    "비육우": "🐄", "무지방 건조우유": "🥛", "돈육": "🐖", "생우": "🐂", "코코아": "🍫",
+    "면화": "🧵", "미국달러지수": "💵", "커피": "☕", "오렌지주스": "🍊", "설탕": "🍬",
+    "금": "🥇", "은": "🥈", "구리": "🟠", "알루미늄": "⚙️",
+}
+
+
+# ================================================================ 원자재
+def page_commodity():
+    st.title("🛢️ 원자재")
+
+    commodity_dates = df.loc[df["그룹"].isin(COMMODITY_ORDER), "날짜"]
+    min_date, max_date = commodity_dates.min().date(), commodity_dates.max().date()
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="5Y")
+
+    available = [g for g in COMMODITY_ORDER if not df.loc[df["그룹"] == g].empty]
+    cols = st.columns(3)
+    for i, group in enumerate(available):
+        view = _series_history_view(group, start_date, end_date)
+        emoji = COMMODITY_EMOJI.get(group, "")
+        with cols[i % 3]:
+            _plot_with_ma(view, f"{emoji} {group}", "가격", f"{emoji} {group}", key=f"commodity_{group}")
         if (i + 1) % 3 == 0:
             _chart_gap()
 
@@ -416,6 +448,7 @@ nav = st.navigation([
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_fx, title="FX", icon="💱"),
+    st.Page(page_commodity, title="원자재", icon="🛢️"),
     st.Page(page_credit, title="신용스프레드", icon="🏦"),
     st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
     st.Page(page_short, title="단기금리", icon="📉"),

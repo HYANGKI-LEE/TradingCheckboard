@@ -40,6 +40,17 @@ SHEET_DAILY = "Info(국내금리)"
 SHEET_SHORT = "Info(단기금리)"
 SHEET_FOREIGN = "Info(해외금리)"
 SHEET_FX = "Info(FX)"
+SHEET_COMMODITY = "Info(원자재)"
+
+# 원자재는 "WTI 2026-10 (연결선물)" 처럼 제목에 연결선물 만기 월이 붙어있고, 롤오버되면
+# 다음달엔 "2026-11" 로 바뀐다 - 그 월/연도 꼬리표를 떼어내서 매달 같은 그룹으로 이어지게 한다.
+COMMODITY_ORDER = [
+    "WTI", "브렌트", "두바이유", "천연가스", "팔라듐", "백금", "블룸버그 상품 지수", "에탄올",
+    "KC HRW 밀", "다우 존스 부동산", "미니 옥수수", "미니 콩", "미니 소맥", "옥수수", "대두유",
+    "대두박", "귀리", "30 DAY FEDERAL FUNDS", "쌀", "대두", "시카고 SRW 밀", "버터", "치즈",
+    "3등급 우유", "4등급 우유", "비육우", "무지방 건조우유", "돈육", "생우", "코코아", "면화",
+    "미국달러지수", "커피", "오렌지주스", "설탕", "금", "은", "구리", "알루미늄",
+]
 
 FOREIGN_COUNTRIES_ORDER = [
     "미국", "독일", "영국", "프랑스", "이탈리아", "일본", "호주", "캐나다",
@@ -56,6 +67,19 @@ _CURVE_PREFIX = "시가평가 4사평균 "
 _IRS_PREFIX = "원화 IRS 종합코드 "
 _FX_CROSS_PREFIX = "이종통화 종합 "
 _GROUP_RENAME = {"국고채권": "국고채", "통안증권": "통안채"}
+
+# 원자재 제목 정리용: "(연결선물)" 꼬리표(끊겨도 매칭), "(LAST-DAY FIN.)" 표기, "YYYY-M" 만기월
+_COMMODITY_TAIL_RE = re.compile(r"\s*\(연결선?물?\)?\s*$")
+_COMMODITY_LASTDAY_RE = re.compile(r"\(LAST-DAY FIN\.\)")
+_COMMODITY_DATE_RE = re.compile(r"\s*\d{4}-\d{1,2}\s*$")
+
+
+def _clean_commodity_name(title: str) -> str:
+    name = title.strip()
+    name = _COMMODITY_TAIL_RE.sub("", name)
+    name = _COMMODITY_LASTDAY_RE.sub("", name)
+    name = _COMMODITY_DATE_RE.sub("", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 CREDIT_GROUPS_ORDER = [
     "국고채", "통안채", "은행채AAA",
@@ -96,8 +120,11 @@ def _find_blocks(row2: tuple) -> list[tuple[int, int, str]]:
     return [(starts[i], starts[i + 1] - 1, row2[starts[i]]) for i in range(len(starts) - 1)]
 
 
-def _block_to_group_tenor(title: str, sub) -> tuple[str, str] | None:
+def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tuple[str, str] | None:
     title = (title or "").strip()
+    if sheet_hint == "원자재":
+        name = _clean_commodity_name(title)
+        return (name, None) if name else None
     if title.startswith(_CURVE_PREFIX):
         name = title[len(_CURVE_PREFIX):].replace("(공모/무보증)", "")
         name = name.replace("금융채 ", "").replace(" ", "")
@@ -135,7 +162,7 @@ def _block_to_group_tenor(title: str, sub) -> tuple[str, str] | None:
 _HARD_ROW_CAP = 200_000  # 절대적인 안전장치 - 정상 시나리오에서는 도달하지 않음
 
 
-def _parse_sheet(ws) -> pd.DataFrame:
+def _parse_sheet(ws, sheet_hint: str | None = None) -> pd.DataFrame:
     rows_iter = ws.iter_rows(values_only=True)
     try:
         next(rows_iter)  # row1 (설정값 - "Data 개수" 등, 신뢰하지 않고 실제 값 유무로 판단)
@@ -150,7 +177,7 @@ def _parse_sheet(ws) -> pd.DataFrame:
             if c == 0:
                 continue  # A열은 날짜 칼럼이라 데이터로 취급하지 않음
             sub = row3[c] if c < len(row3) else None
-            mapped = _block_to_group_tenor(title, sub)
+            mapped = _block_to_group_tenor(title, sub, sheet_hint)
             if mapped is not None:
                 col_map[c] = mapped
 
@@ -182,10 +209,14 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
         df_short = _parse_sheet(wb[SHEET_SHORT]) if SHEET_SHORT in wb.sheetnames else pd.DataFrame()
         df_foreign = _parse_sheet(wb[SHEET_FOREIGN]) if SHEET_FOREIGN in wb.sheetnames else pd.DataFrame()
         df_fx = _parse_sheet(wb[SHEET_FX]) if SHEET_FX in wb.sheetnames else pd.DataFrame()
+        df_commodity = _parse_sheet(wb[SHEET_COMMODITY], sheet_hint="원자재") \
+            if SHEET_COMMODITY in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
-    df = pd.concat([df_daily, df_short, df_foreign, df_fx], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
+    df = pd.concat(
+        [df_daily, df_short, df_foreign, df_fx, df_commodity], ignore_index=True
+    ).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
     tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \
                 [t for t in df["만기"].dropna().unique() if t not in TENOR_ORDER]
