@@ -38,6 +38,12 @@ EXCEL_PATH = DATA_DIR / "RawData.xlsx"
 
 SHEET_DAILY = "Info(국내금리)"
 SHEET_SHORT = "Info(단기금리)"
+SHEET_FOREIGN = "Info(해외금리)"
+
+FOREIGN_COUNTRIES_ORDER = [
+    "미국", "독일", "영국", "프랑스", "이탈리아", "일본", "호주", "캐나다",
+    "인도", "인도네시아", "브라질", "멕시코", "남아공",
+]
 
 TENOR_ORDER = [
     "91D", "6M", "9M", "1Y", "1.5Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y",
@@ -103,6 +109,13 @@ def _block_to_group_tenor(title: str, sub) -> tuple[str, str] | None:
         return ("CD", "91D")
     if title == "한국:기준금리":
         return ("기준금리", None)
+    # 해외금리 시트: "{국가}(종합)? {N}년" 형태 (예: "미국(종합) 2년", "독일 10년")
+    stripped = title.replace("(종합)", "").strip()
+    if " " in stripped and stripped.rsplit(" ", 1)[-1].endswith("년"):
+        country, tenor_str = stripped.rsplit(" ", 1)
+        tenor = _normalize_tenor(tenor_str)
+        if country and tenor:
+            return (country, tenor)
     return None
 
 
@@ -154,10 +167,11 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
     try:
         df_daily = _parse_sheet(wb[SHEET_DAILY]) if SHEET_DAILY in wb.sheetnames else pd.DataFrame()
         df_short = _parse_sheet(wb[SHEET_SHORT]) if SHEET_SHORT in wb.sheetnames else pd.DataFrame()
+        df_foreign = _parse_sheet(wb[SHEET_FOREIGN]) if SHEET_FOREIGN in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
-    df = pd.concat([df_daily, df_short], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
+    df = pd.concat([df_daily, df_short, df_foreign], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
     tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \
                 [t for t in df["만기"].dropna().unique() if t not in TENOR_ORDER]

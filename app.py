@@ -5,6 +5,7 @@ import streamlit as st
 
 from data_loader import (
     CREDIT_GROUPS_ORDER,
+    FOREIGN_COUNTRIES_ORDER,
     load_raw_data,
     latest_curve,
     curve_history,
@@ -90,6 +91,30 @@ def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, k
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
+def _tenor_history_view(group: str, tenor: str, start_date, end_date) -> pd.DataFrame:
+    hist = curve_history(df, group, tenor).copy()
+    hist = hist.assign(**_with_ma(hist["값"]))
+    return hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+
+
+def _tenor_spread_view(group: str, long_t: str, short_t: str, start_date, end_date) -> pd.DataFrame:
+    """같은 그룹 내에서 만기간 스프레드 (장기 - 단기, bp)."""
+    a = curve_history(df, group, long_t)[["날짜", "값"]].rename(columns={"값": "장기"})
+    b = curve_history(df, group, short_t)[["날짜", "값"]].rename(columns={"값": "단기"})
+    merged = a.merge(b, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = (merged["장기"] - merged["단기"]) * 100
+    merged = merged.assign(**_with_ma(merged["값"]))
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+def _cross_group_spread_view(group_a: str, group_b: str, tenor: str, start_date, end_date) -> pd.DataFrame:
+    """서로 다른 그룹(국가/상품군) 간 같은 만기 스프레드 (group_a - group_b, bp)."""
+    spread_df = credit_spread(df, group_a, group_b)
+    spread_df = spread_df[spread_df["만기"] == tenor].sort_values("날짜").rename(columns={"스프레드_bp": "값"})
+    spread_df = spread_df.assign(**_with_ma(spread_df["값"]))
+    return spread_df[(spread_df["날짜"].dt.date >= start_date) & (spread_df["날짜"].dt.date <= end_date)]
+
+
 # ================================================================ 국내금리
 def page_domestic_rate():
     st.title("🏛️ 국내금리")
@@ -103,24 +128,78 @@ def page_domestic_rate():
     with tab_rates:
         cols = st.columns(2)
         for i, tenor in enumerate(DOMESTIC_RATE_TENORS):
-            hist = curve_history(df, "국고채", tenor).copy()
-            hist = hist.assign(**_with_ma(hist["값"]))
-            view = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+            view = _tenor_history_view("국고채", tenor, start_date, end_date)
             with cols[i % 2]:
                 _plot_with_ma(view, f"국고채 {tenor}", "금리 (%)", f"국고채 {tenor}", key=f"rate_{tenor}")
 
     with tab_spread:
         cols2 = st.columns(2)
         for i, (long_t, short_t) in enumerate(DOMESTIC_SPREADS):
-            a = curve_history(df, "국고채", long_t)[["날짜", "값"]].rename(columns={"값": "장기"})
-            b = curve_history(df, "국고채", short_t)[["날짜", "값"]].rename(columns={"값": "단기"})
-            merged = a.merge(b, on="날짜", how="inner").sort_values("날짜")
-            merged["값"] = (merged["장기"] - merged["단기"]) * 100
-            merged = merged.assign(**_with_ma(merged["값"]))
-            view = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+            view = _tenor_spread_view("국고채", long_t, short_t, start_date, end_date)
             label = f"{long_t}-{short_t}"
             with cols2[i % 2]:
                 _plot_with_ma(view, f"국고채 {label} 스프레드", "bp", label, key=f"spread_{label}")
+
+
+FOREIGN_RATE_PREFERRED = ["2Y", "10Y", "30Y"]
+FOREIGN_RATE_FALLBACK = ["3Y", "10Y", "30Y"]
+CROSS_COUNTRY_SPREADS = [
+    ("한국", "미국"), ("미국", "독일"), ("미국", "영국"),
+    ("영국", "독일"), ("이탈리아", "독일"), ("한국", "호주"),
+]
+
+
+def _foreign_group_key(display_name: str) -> str:
+    return "국고채" if display_name == "한국" else display_name
+
+
+# ================================================================ 해외금리
+def page_foreign_rate():
+    st.title("🌍 해외금리")
+
+    foreign_dates = df.loc[df["그룹"].isin(FOREIGN_COUNTRIES_ORDER), "날짜"]
+    min_date, max_date = foreign_dates.min().date(), foreign_dates.max().date()
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="5Y")
+
+    tab_rates, tab_spread_period, tab_spread_country = st.tabs(["Rates", "스프레드(기간)", "스프레드(국가간)"])
+
+    with tab_rates:
+        for country in FOREIGN_COUNTRIES_ORDER:
+            available = set(df.loc[df["그룹"] == country, "만기"].dropna().astype(str).unique())
+            target = FOREIGN_RATE_PREFERRED if "2Y" in available else FOREIGN_RATE_FALLBACK
+            target = [t for t in target if t in available]
+            if not target:
+                continue
+            st.subheader(country)
+            cols = st.columns(3)
+            for i, tenor in enumerate(target):
+                view = _tenor_history_view(country, tenor, start_date, end_date)
+                with cols[i]:
+                    _plot_with_ma(view, f"{country} {tenor}", "금리 (%)", f"{country} {tenor}",
+                                  key=f"foreign_rate_{country}_{tenor}")
+
+    with tab_spread_period:
+        cols2 = st.columns(3)
+        idx = 0
+        for country in FOREIGN_COUNTRIES_ORDER:
+            available = set(df.loc[df["그룹"] == country, "만기"].dropna().astype(str).unique())
+            short_t = "2Y" if "2Y" in available else ("3Y" if "3Y" in available else None)
+            if short_t is None or "10Y" not in available:
+                continue
+            view = _tenor_spread_view(country, "10Y", short_t, start_date, end_date)
+            label = f"10Y-{short_t}"
+            with cols2[idx % 3]:
+                _plot_with_ma(view, f"{country} {label}", "bp", f"{country} {label}",
+                              key=f"foreign_spread_{country}")
+            idx += 1
+
+    with tab_spread_country:
+        cols3 = st.columns(3)
+        for i, (a, b) in enumerate(CROSS_COUNTRY_SPREADS):
+            view = _cross_group_spread_view(_foreign_group_key(a), _foreign_group_key(b), "10Y", start_date, end_date)
+            label = f"{a}-{b}"
+            with cols3[i % 3]:
+                _plot_with_ma(view, f"{label} (10Y)", "bp", label, key=f"cross_spread_{label}")
 
 
 # ================================================================ 신용스프레드
@@ -266,6 +345,7 @@ def page_short():
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
+    st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_credit, title="신용스프레드", icon="🏦"),
     st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
     st.Page(page_short, title="단기금리", icon="📉"),
