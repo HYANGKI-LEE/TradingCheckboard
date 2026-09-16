@@ -128,7 +128,9 @@ def _parse_sheet(ws) -> pd.DataFrame:
             if mapped is not None:
                 col_map[c] = mapped
 
-    rows = []
+    # 딕셔너리 리스트 대신 컬럼별 리스트에 쌓는다 - 32년치 x 20여개 커브면 백만 행 단위라
+    # 행당 dict 하나씩 만들면 메모리를 너무 많이 먹어서(Streamlit Cloud 무료 인스턴스 OOM 원인) 이 방식이 필요함
+    dates, groups, tenors, vals = [], [], [], []
     for i, r in enumerate(rows_iter):
         if i >= _HARD_ROW_CAP:
             break
@@ -139,8 +141,11 @@ def _parse_sheet(ws) -> pd.DataFrame:
             val = r[c] if c < len(r) else None
             if val in (None, "", 0):
                 continue
-            rows.append({"날짜": date, "그룹": group, "만기": tenor, "값": val})
-    return pd.DataFrame(rows)
+            dates.append(date)
+            groups.append(group)
+            tenors.append(tenor)
+            vals.append(val)
+    return pd.DataFrame({"날짜": dates, "그룹": groups, "만기": tenors, "값": vals})
 
 
 @st.cache_data(show_spinner="RawData.xlsx 불러오는 중...")
