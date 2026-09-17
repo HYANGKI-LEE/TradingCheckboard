@@ -19,6 +19,43 @@ from data_loader import (
 
 st.set_page_config(page_title="채권/IRS 트레이딩 대시보드", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    /* st.container(key=...)가 만드는 div 자체는 부모(element-container)와 높이가 같아서
+       그대로 sticky를 걸면 containing block에 여유가 없어 전혀 고정되지 않는다.
+       :has()로 그 바깥 element-container(페이지 전체 높이를 가진 블록의 자식)를 잡아서 고정시킨다. */
+    div:has(> div.st-key-sticky_header) {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background-color: var(--background-color, white);
+        padding-top: 0.5rem;
+        padding-bottom: 0.4rem;
+    }
+    div:has(> div[class*="st-key-sticky_subheader_"]) {
+        position: sticky;
+        top: 5.6rem;
+        z-index: 998;
+        background-color: var(--background-color, white);
+        padding-bottom: 0.4rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _sticky_header():
+    """페이지 제목 + 기간 선택 위젯을 화면 상단에 고정."""
+    return st.container(key="sticky_header")
+
+
+def _sticky_subheader(key: str):
+    """(탭 내부에 있는) 기간 선택 위젯을 제목 바로 아래에 고정. 탭마다 렌더링되므로 key는 탭별로 달라야 함."""
+    return st.container(key=f"sticky_subheader_{key}")
+
+
 df, is_sample = load_raw_data()
 
 if is_sample:
@@ -242,11 +279,14 @@ def _daily_change_bar_chart():
 
     fig = go.Figure()
     fig.add_trace(go.Bar(name="현물(국고)", x=BAR_TENORS,
-                          y=[ktb[t]["1d"] if ktb[t] else None for t in BAR_TENORS], marker_color="#4472C4"))
+                          y=[ktb[t]["1d"] if ktb[t] else None for t in BAR_TENORS], marker_color="#4472C4",
+                          texttemplate="%{y:.1f}", textposition="outside"))
     fig.add_trace(go.Bar(name="IRS", x=BAR_TENORS,
-                          y=[irs[t]["1d"] if irs[t] else None for t in BAR_TENORS], marker_color="#ED9E1B"))
+                          y=[irs[t]["1d"] if irs[t] else None for t in BAR_TENORS], marker_color="#ED9E1B",
+                          texttemplate="%{y:.1f}", textposition="outside"))
     fut_tenors = [t for t in ["3년", "10년"] if fut[t] is not None]
-    fig.add_trace(go.Bar(name="선물", x=fut_tenors, y=[fut[t]["1d"] for t in fut_tenors], marker_color="#A5A5A5"))
+    fig.add_trace(go.Bar(name="선물", x=fut_tenors, y=[fut[t]["1d"] for t in fut_tenors], marker_color="#A5A5A5",
+                          texttemplate="%{y:.1f}", textposition="outside"))
 
     fig.update_layout(barmode="group", title="전일 대비 금리 변동폭", yaxis_title="(bp)", height=460,
                        legend=dict(orientation="h", y=-0.15), margin=dict(t=40))
@@ -261,11 +301,11 @@ IRS_TABLE_TENORS = [
 
 # ================================================================ 국내금리
 def page_domestic_rate():
-    st.title("🏛️ 국내금리")
-
     govt_dates = df.loc[df["그룹"] == "국고채", "날짜"]
     min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
+    with _sticky_header():
+        st.title("🏛️ 국내금리")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
 
     tab_change, tab_rates, tab_spread, tab_futures = st.tabs(["변동", "Rates", "스프레드", "선물"])
 
@@ -360,11 +400,11 @@ def _irs_butterfly_view(short_t: str, mid_t: str, long_t: str, start_date, end_d
 
 # ================================================================ IRS (Par/스프레드/Zero/Fwd/버터플라이)
 def page_irs_detail():
-    st.title("🔁 IRS")
-
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
+    with _sticky_header():
+        st.title("🔁 IRS")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
     available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
     tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
@@ -384,13 +424,32 @@ def page_irs_detail():
                                   key=f"irsdetail_{group}_{tenor}")
 
     with tab_spread:
-        st.markdown("#### 기준금리")
+        st.markdown("#### 기준금리 + 커스텀 스프레드")
+        tenor_options = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in available_tenors]
+        col_a, col_b = st.columns(2)
+        with col_a:
+            tenor_a = st.selectbox("만기 A", tenor_options,
+                                    index=tenor_options.index("3Y") if "3Y" in tenor_options else 0,
+                                    key="irs_custom_a")
+        with col_b:
+            tenor_b = st.selectbox("만기 B", tenor_options,
+                                    index=tenor_options.index("1Y") if "1Y" in tenor_options else 0,
+                                    key="irs_custom_b")
+
         base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
         base_rate = base_rate[(base_rate["날짜"].dt.date >= start_date) & (base_rate["날짜"].dt.date <= end_date)]
         fig_base = go.Figure()
+        if tenor_a != tenor_b:
+            custom_view = _tenor_spread_view("IRS", tenor_a, tenor_b, start_date, end_date)
+            fig_base.add_trace(go.Scatter(x=custom_view["날짜"], y=custom_view["값"], mode="lines",
+                                           name=f"IRS {tenor_a}-{tenor_b}", line=dict(color="#2980B9", width=2.5)))
+        else:
+            st.caption("서로 다른 만기 2개를 선택해주세요.")
         fig_base.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["값"], mode="lines", name="기준금리",
-                                       line=dict(color="gray", shape="hv", width=2)))
-        fig_base.update_layout(height=280, yaxis_title="%", margin=dict(t=20))
+                                       line=dict(color="gray", shape="hv", width=2), yaxis="y2"))
+        fig_base.update_layout(height=320, yaxis=dict(title="bp"),
+                                yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
+                                legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
         st.plotly_chart(fig_base, use_container_width=True, key="irs_spread_base_rate")
 
         _chart_gap()
@@ -404,25 +463,6 @@ def page_irs_detail():
             with cols[i % 3]:
                 _plot_with_ma(view, f"IRS {label}", "bp", label, key=f"irs_spread_{label}")
             i += 1
-
-        _chart_gap()
-        st.markdown("#### 커스텀 스프레드")
-        tenor_options = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in available_tenors]
-        col_a, col_b = st.columns(2)
-        with col_a:
-            tenor_a = st.selectbox("만기 A", tenor_options,
-                                    index=tenor_options.index("3Y") if "3Y" in tenor_options else 0,
-                                    key="irs_custom_a")
-        with col_b:
-            tenor_b = st.selectbox("만기 B", tenor_options,
-                                    index=tenor_options.index("1Y") if "1Y" in tenor_options else 0,
-                                    key="irs_custom_b")
-        if tenor_a != tenor_b:
-            custom_view = _tenor_spread_view("IRS", tenor_a, tenor_b, start_date, end_date)
-            _plot_with_ma(custom_view, f"IRS {tenor_a}-{tenor_b}", "bp", f"{tenor_a}-{tenor_b}",
-                          key="irs_custom_spread")
-        else:
-            st.caption("서로 다른 만기 2개를 선택해주세요.")
 
     with tab_fly:
         cols = st.columns(3)
@@ -512,11 +552,11 @@ def _foreign_rate_change_table(tenor: str = "10Y") -> pd.DataFrame:
 
 # ================================================================ 해외금리
 def page_foreign_rate():
-    st.title("🌍 해외금리")
-
     foreign_dates = df.loc[df["그룹"].isin(FOREIGN_COUNTRIES_ORDER), "날짜"]
     min_date, max_date = foreign_dates.min().date(), foreign_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="1Y")
+    with _sticky_header():
+        st.title("🌍 해외금리")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="1Y")
 
     tab_change, tab_rates, tab_spread_period, tab_spread_country = st.tabs(
         ["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"]
@@ -621,12 +661,12 @@ def _fx_cross_krw_view(ccy_group: str, start_date, end_date) -> pd.DataFrame:
 
 # ================================================================ FX
 def page_fx():
-    st.title("💱 FX")
-
     fx_groups = [g for g, is_cross in FX_ORDER if not is_cross]
     fx_dates = df.loc[df["그룹"].isin(fx_groups), "날짜"]
     min_date, max_date = fx_dates.min().date(), fx_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="1Y")
+    with _sticky_header():
+        st.title("💱 FX")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="1Y")
 
     cols = st.columns(3)
     for i, (group, is_cross) in enumerate(FX_ORDER):
@@ -672,11 +712,11 @@ def _commodity_ratio_view(a_group: str, b_group: str, start_date, end_date) -> p
 
 
 def page_commodity():
-    st.title("🛢️ 원자재")
-
     commodity_dates = df.loc[df["그룹"].isin(COMMODITY_ORDER), "날짜"]
     min_date, max_date = commodity_dates.min().date(), commodity_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
+    with _sticky_header():
+        st.title("🛢️ 원자재")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
 
     for category, groups in COMMODITY_CATEGORIES.items():
         available = [g for g in groups if g == "금은Ratio" or not df.loc[df["그룹"] == g].empty]
@@ -714,11 +754,11 @@ def _yield_gap_data(start_date, end_date) -> pd.DataFrame:
 
 # ================================================================ 주식
 def page_stock():
-    st.title("📈 주식")
-
     stock_dates = df.loc[df["그룹"] == "KOSPI", "날짜"]
     min_date, max_date = stock_dates.min().date(), stock_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="stock", default="1Y")
+    with _sticky_header():
+        st.title("📈 주식")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="stock", default="5Y")
 
     tab_yieldgap, tab_indices = st.tabs(["Yield Gap", "주가추이"])
 
@@ -759,7 +799,8 @@ def page_stock():
 
 # ================================================================ 신용스프레드
 def page_credit():
-    st.title("🏦 신용스프레드")
+    with _sticky_header():
+        st.title("🏦 신용스프레드")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -828,7 +869,8 @@ def page_credit():
 
 # ================================================================ IRS
 def page_irs():
-    st.title("🔁 IRS 커브 / 본드스왑 스프레드")
+    with _sticky_header():
+        st.title("🔁 IRS 커브 / 본드스왑 스프레드")
 
     latest_irs = latest_curve(df, "IRS")
     latest_irs_date = latest_irs["날짜"].max()
@@ -878,7 +920,8 @@ def page_irs():
 
 # ================================================================ 단기금리
 def page_short():
-    st.title("📉 단기금리")
+    with _sticky_header():
+        st.title("📉 단기금리")
 
     st.subheader("기준금리 / CD(91일) 히스토리")
     base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜").rename(columns={"값": "기준금리"})
@@ -1046,7 +1089,8 @@ def _irs_ktb_vs_futures_dual_axis(start_date, end_date):
 
 # ================================================================ Relative Value
 def page_relative_value():
-    st.title("⚖️ Relative Value")
+    with _sticky_header():
+        st.title("⚖️ Relative Value")
 
     tab_valuation, tab_irsktb, tab_irsfut = st.tabs(["Valuation", "IRS-KTB", "IRS-선물"])
 
@@ -1054,7 +1098,8 @@ def page_relative_value():
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
 
     with tab_valuation:
-        start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="1Y")
+        with _sticky_subheader("valuation"):
+            start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="1Y")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -1083,7 +1128,8 @@ def page_relative_value():
                           "BSS-ABCP", key="rv_bss_minus_abcp", avg_line=avg)
 
     with tab_irsfut:
-        start_date3, end_date3 = period_selector(min_date, max_date, key_prefix="rv_irsfut", default="1Y")
+        with _sticky_subheader("irsfut"):
+            start_date3, end_date3 = period_selector(min_date, max_date, key_prefix="rv_irsfut", default="1Y")
         st.markdown("#### IRS-선물내재수익률")
         cols3 = st.columns(2)
         for i, (irs_tenor, futures_group) in enumerate(IRS_FUTURES_PAIRS):
@@ -1095,7 +1141,8 @@ def page_relative_value():
                               key=f"rv_irsfut_{irs_tenor}", avg_line=avg)
 
     with tab_irsktb:
-        start_date2, end_date2 = period_selector(min_date, max_date, key_prefix="rv_irsktb", default="1Y")
+        with _sticky_subheader("irsktb"):
+            start_date2, end_date2 = period_selector(min_date, max_date, key_prefix="rv_irsktb", default="1Y")
 
         cols = st.columns(3)
         for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
