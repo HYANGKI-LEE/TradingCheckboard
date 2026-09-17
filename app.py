@@ -161,6 +161,104 @@ def _plot_change_multi(series_list: list[tuple[str, str, str]], start_date, end_
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
+def _rate_change_row(label: str, group: str, tenor: str | None = None) -> dict | None:
+    """항목 한 줄: 현재가 + 1d/1w/MTD/QTD/YTD 변동(bp). 당일 미갱신(캐리포워드)은 건너뛰고
+    실제 값이 바뀐 가장 최근 시점을 기준으로 계산 (해외금리 변동표와 동일한 로직)."""
+    if tenor is not None:
+        hist = curve_history(df, group, tenor)[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    else:
+        hist = df[df["그룹"] == group][["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        return round((latest_val - prior.iloc[-1]["값"]) * 100, 1) if not prior.empty else None
+
+    return {
+        "항목": label,
+        "현재가": round(latest_val, 3),
+        "1d": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+    }
+
+
+def _format_bp_html(val) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    if val < 0:
+        return f'<span style="color:#C0392B">({abs(val):.1f})</span>'
+    return f"{val:.1f}"
+
+
+def _render_rate_table(sections: list, highlight: set) -> str:
+    """sections: [(섹션제목, [row_dict,...]), ...]. row_dict 는 _rate_change_row 반환값."""
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:13px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">항목</th>'
+            '<th style="text-align:right;padding:4px 6px;">현재가(%)</th>'
+            '<th colspan="5" style="text-align:center;padding:4px 6px;">변동(bp)</th></tr>'
+            '<tr style="border-bottom:1px solid #999;">'
+            '<th></th><th></th>'
+            '<th style="text-align:right;padding:2px 6px;">1d</th>'
+            '<th style="text-align:right;padding:2px 6px;">1w</th>'
+            '<th style="text-align:right;padding:2px 6px;">MTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">QTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">YTD</th></tr>']
+    for title, rows in sections:
+        html.append(f'<tr><td colspan="7" style="background:#EEE;font-weight:bold;padding:4px 6px;">{title}</td></tr>')
+        for row in rows:
+            if row is None:
+                continue
+            bg = "background:#FDEBD0;" if row["항목"] in highlight else ""
+            html.append(f'<tr style="{bg}border-bottom:1px solid #eee;">')
+            html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
+            html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.3f}</td>')
+            for col in ["1d", "1w", "MTD", "QTD", "YTD"]:
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+            html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
+BAR_TENORS = ["1년", "2년", "3년", "5년", "10년"]
+BAR_TENOR_TO_YEAR = {"1년": "1Y", "2년": "2Y", "3년": "3Y", "5년": "5Y", "10년": "10Y"}
+
+
+def _daily_change_bar_chart():
+    ktb = {t: _rate_change_row(f"국고 {t}", "국고채", BAR_TENOR_TO_YEAR[t]) for t in BAR_TENORS}
+    irs = {t: _rate_change_row(f"IRS {t}", "IRS", BAR_TENOR_TO_YEAR[t]) for t in BAR_TENORS}
+    fut = {"3년": _rate_change_row("선물 3년", "선물3년", "내재수익률"),
+           "10년": _rate_change_row("선물 10년", "선물10년", "내재수익률")}
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="현물(국고)", x=BAR_TENORS,
+                          y=[ktb[t]["1d"] if ktb[t] else None for t in BAR_TENORS], marker_color="#4472C4"))
+    fig.add_trace(go.Bar(name="IRS", x=BAR_TENORS,
+                          y=[irs[t]["1d"] if irs[t] else None for t in BAR_TENORS], marker_color="#ED9E1B"))
+    fut_tenors = [t for t in ["3년", "10년"] if fut[t] is not None]
+    fig.add_trace(go.Bar(name="선물", x=fut_tenors, y=[fut[t]["1d"] for t in fut_tenors], marker_color="#A5A5A5"))
+
+    fig.update_layout(barmode="group", title="전일 대비 금리 변동폭", yaxis_title="(bp)", height=460,
+                       legend=dict(orientation="h", y=-0.15), margin=dict(t=40))
+    return fig
+
+
+IRS_TABLE_TENORS = [
+    "6M", "9M", "1Y", "1.5Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y",
+    "9Y", "10Y", "11Y", "12Y", "15Y", "20Y", "25Y", "30Y",
+]
+
+
 # ================================================================ 국내금리
 def page_domestic_rate():
     st.title("🏛️ 국내금리")
@@ -169,7 +267,26 @@ def page_domestic_rate():
     min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
     start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
 
-    tab_rates, tab_change, tab_spread, tab_futures = st.tabs(["Rates", "변동", "스프레드", "선물"])
+    tab_change, tab_rates, tab_spread, tab_futures = st.tabs(["변동", "Rates", "스프레드", "선물"])
+
+    with tab_change:
+        st.markdown("#### 주요 금리")
+        col_table, col_bar = st.columns([3, 2])
+        with col_table:
+            sections = [
+                ("국고채", [_rate_change_row(f"국고 {t}", "국고채", t) for t in ["3Y", "5Y", "10Y"]]),
+                ("선물(내재수익률,%)", [_rate_change_row(f"선물 {t}", g, "내재수익률")
+                                    for t, g in [("3년", "선물3년"), ("10년", "선물10년")]]),
+                ("IRS(%)", [_rate_change_row(t, "IRS", t) for t in IRS_TABLE_TENORS]),
+            ]
+            st.markdown(_render_rate_table(sections, highlight={"1Y", "2Y", "3Y"}), unsafe_allow_html=True)
+        with col_bar:
+            st.plotly_chart(_daily_change_bar_chart(), use_container_width=True, key="domestic_change_bar")
+
+        _chart_gap()
+        change_start, change_end = period_selector(min_date, max_date, key_prefix="domestic_change", default="YTD")
+        _plot_change_multi(DOMESTIC_CHANGE_SERIES, change_start, change_end,
+                            "주요금리 변동 추이", key="domestic_change_chart")
 
     with tab_rates:
         cols = st.columns(2)
@@ -177,11 +294,6 @@ def page_domestic_rate():
             view = _tenor_history_view("국고채", tenor, start_date, end_date)
             with cols[i % 2]:
                 _plot_with_ma(view, f"국고채 {tenor}", "금리 (%)", f"국고채 {tenor}", key=f"rate_{tenor}")
-
-    with tab_change:
-        change_start, change_end = period_selector(min_date, max_date, key_prefix="domestic_change", default="YTD")
-        _plot_change_multi(DOMESTIC_CHANGE_SERIES, change_start, change_end,
-                            "주요금리 변동 추이", key="domestic_change_chart")
 
     with tab_spread:
         cols2 = st.columns(2)
