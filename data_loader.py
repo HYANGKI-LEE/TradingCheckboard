@@ -26,6 +26,7 @@ load_raw_data() 는 파일 mtime 을 키로 st.cache_data 캐싱한다 - 파일�
 
 from __future__ import annotations
 
+import datetime
 import re
 from pathlib import Path
 
@@ -41,6 +42,15 @@ SHEET_SHORT = "Info(단기금리)"
 SHEET_FOREIGN = "Info(해외금리)"
 SHEET_FX = "Info(FX)"
 SHEET_COMMODITY = "Info(원자재)"
+SHEET_IRS_DETAIL = "Info(IRS)"
+
+# IRS Zero/Forward curve 만기 순서 (01M~11M, 01Y, 18M(=1.5Y), 02Y~50Y - 시트의 서브헤더 순서 그대로)
+IRS_ZERO_FWD_TENOR_ORDER = [
+    "1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "10M", "11M",
+    "1Y", "1.5Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y", "9Y", "10Y",
+    "11Y", "12Y", "13Y", "14Y", "15Y", "16Y", "17Y", "18Y", "19Y", "20Y",
+    "25Y", "30Y", "35Y", "40Y", "45Y", "50Y",
+]
 
 # 원자재는 "WTI 2026-10 (연결선물)" 처럼 제목에 연결선물 만기 월이 붙어있고, 롤오버되면
 # 다음달엔 "2026-11" 로 바뀐다 - 그 월/연도 꼬리표를 떼어내서 매달 같은 그룹으로 이어지게 한다.
@@ -106,6 +116,19 @@ def _normalize_tenor(label: str) -> str | None:
     return None
 
 
+def _normalize_tenor_en(label: str) -> str | None:
+    """IRS Zero/Forward curve 서브헤더 형식: '01M'~'11M', '01Y'~'50Y' (18M=1.5Y 특례)."""
+    label = (label or "").strip().upper()
+    m = re.match(r"^0*(\d+)M$", label)
+    if m:
+        months = int(m.group(1))
+        return "1.5Y" if months == 18 else f"{months}M"
+    m = re.match(r"^0*(\d+)Y$", label)
+    if m:
+        return f"{int(m.group(1))}Y"
+    return None
+
+
 def _find_blocks(row2: tuple) -> list[tuple[int, int, str]]:
     """
     row2(0-based 튜플) 를 스캔해서 (시작컬럼, 끝컬럼, 블록제목) 리스트 반환.
@@ -134,6 +157,12 @@ def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tup
     if title.startswith(_IRS_PREFIX):
         tenor = _normalize_tenor(title[len(_IRS_PREFIX):])
         return ("IRS", tenor) if tenor else None
+    if title == "IRS ZERO CURVE KRWKRW":
+        tenor = _normalize_tenor_en(sub)
+        return ("IRS_ZERO", tenor) if tenor else None
+    if title.startswith("IRS FORWARD CURVE KRWKRW"):
+        tenor = _normalize_tenor_en(sub)
+        return ("IRS_FWD3M", tenor) if tenor else None
     if "CD(91일물)" in title:
         return ("CD", "91D")
     if title == "한국:기준금리":
@@ -188,12 +217,12 @@ def _parse_sheet(ws, sheet_hint: str | None = None) -> pd.DataFrame:
         if i >= _HARD_ROW_CAP:
             break
         date = r[0] if len(r) > 0 else None
-        if date is None:
-            continue  # 실데이터가 맨 위부터 연속이라는 보장이 없어서 건너뛰기만 함
+        if not isinstance(date, (datetime.date, datetime.datetime)):
+            continue  # 날짜 칸에 오타/잘못된 값이 들어간 행 방어 (실데이터가 맨 위부터 연속이라는 보장도 없어서 건너뛰기만 함)
         for c, (group, tenor) in col_map.items():
             val = r[c] if c < len(r) else None
-            if val in (None, "", 0):
-                continue
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or val == 0:
+                continue  # 값 칸에 날짜/텍스트가 잘못 들어간 셀 방어
             dates.append(date)
             groups.append(group)
             tenors.append(tenor)
@@ -211,15 +240,18 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
         df_fx = _parse_sheet(wb[SHEET_FX]) if SHEET_FX in wb.sheetnames else pd.DataFrame()
         df_commodity = _parse_sheet(wb[SHEET_COMMODITY], sheet_hint="원자재") \
             if SHEET_COMMODITY in wb.sheetnames else pd.DataFrame()
+        df_irs_detail = _parse_sheet(wb[SHEET_IRS_DETAIL]) if SHEET_IRS_DETAIL in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
     df = pd.concat(
-        [df_daily, df_short, df_foreign, df_fx, df_commodity], ignore_index=True
+        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail], ignore_index=True
     ).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
+    _known_tenors = set(TENOR_ORDER) | set(IRS_ZERO_FWD_TENOR_ORDER)
     tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \
-                [t for t in df["만기"].dropna().unique() if t not in TENOR_ORDER]
+                [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in df["만기"].unique() and t not in TENOR_ORDER] + \
+                [t for t in df["만기"].dropna().unique() if t not in _known_tenors]
     df["만기"] = pd.Categorical(df["만기"], categories=tenor_cat, ordered=True)
     return df.sort_values(["그룹", "날짜", "만기"]).reset_index(drop=True), False
 

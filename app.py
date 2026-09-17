@@ -7,6 +7,7 @@ from data_loader import (
     CREDIT_GROUPS_ORDER,
     FOREIGN_COUNTRIES_ORDER,
     COMMODITY_ORDER,
+    IRS_ZERO_FWD_TENOR_ORDER,
     load_raw_data,
     latest_curve,
     curve_history,
@@ -142,6 +143,32 @@ def page_domestic_rate():
                 _plot_with_ma(view, f"국고채 {label} 스프레드", "bp", label, key=f"spread_{label}")
 
 
+IRS_DETAIL_SUBTABS = [("Par rate", "IRS"), ("Zero rate", "IRS_ZERO"), ("Fwd rate", "IRS_FWD3M")]
+
+
+# ================================================================ IRS (Par/Zero/Fwd)
+def page_irs_detail():
+    st.title("🔁 IRS")
+
+    irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
+    min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="5Y")
+
+    tabs = st.tabs([label for label, _ in IRS_DETAIL_SUBTABS])
+    for tab, (label, group) in zip(tabs, IRS_DETAIL_SUBTABS):
+        with tab:
+            available = set(df.loc[df["그룹"] == group, "만기"].dropna().astype(str).unique())
+            tenors = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in available]
+            cols = st.columns(3)
+            for i, tenor in enumerate(tenors):
+                view = _tenor_history_view(group, tenor, start_date, end_date)
+                with cols[i % 3]:
+                    _plot_with_ma(view, f"{label} {tenor}", "%", f"{label} {tenor}",
+                                  key=f"irsdetail_{group}_{tenor}")
+                if (i + 1) % 3 == 0:
+                    _chart_gap()
+
+
 FOREIGN_RATE_PREFERRED = ["2Y", "10Y", "30Y"]
 FOREIGN_RATE_FALLBACK = ["3Y", "10Y", "30Y"]
 CROSS_COUNTRY_SPREADS = [
@@ -149,11 +176,19 @@ CROSS_COUNTRY_SPREADS = [
     ("영국", "독일"), ("이탈리아", "독일"), ("한국", "호주"),
 ]
 
-COUNTRY_FLAGS = {
-    "한국": "🇰🇷", "미국": "🇺🇸", "독일": "🇩🇪", "영국": "🇬🇧", "프랑스": "🇫🇷",
-    "이탈리아": "🇮🇹", "일본": "🇯🇵", "호주": "🇦🇺", "캐나다": "🇨🇦", "인도": "🇮🇳",
-    "인도네시아": "🇮🇩", "브라질": "🇧🇷", "멕시코": "🇲🇽", "남아공": "🇿🇦",
+COUNTRY_ISO2 = {
+    "한국": "kr", "미국": "us", "독일": "de", "영국": "gb", "프랑스": "fr",
+    "이탈리아": "it", "일본": "jp", "호주": "au", "캐나다": "ca", "인도": "in",
+    "인도네시아": "id", "브라질": "br", "멕시코": "mx", "남아공": "za",
 }
+
+
+def _flag_html(country: str, size: int = 20) -> str:
+    """국기 이모지는 Windows/Plotly 조합에서 깨지는 경우가 있어 실제 이미지로 표시."""
+    iso = COUNTRY_ISO2.get(country)
+    if not iso:
+        return ""
+    return f'<img src="https://flagcdn.com/{size}x{int(size * 0.75)}/{iso}.png" style="vertical-align:middle;margin-right:6px">'
 
 
 def _chart_gap():
@@ -182,13 +217,12 @@ def page_foreign_rate():
             target = [t for t in target if t in available]
             if not target:
                 continue
-            flag = COUNTRY_FLAGS.get(country, "")
-            st.subheader(f"{flag} {country}")
+            st.markdown(f"#### {_flag_html(country, 24)}{country}", unsafe_allow_html=True)
             cols = st.columns(3)
             for i, tenor in enumerate(target):
                 view = _tenor_history_view(country, tenor, start_date, end_date)
                 with cols[i]:
-                    _plot_with_ma(view, f"{flag} {country} {tenor}", "금리 (%)", f"{country} {tenor}",
+                    _plot_with_ma(view, f"{country} {tenor}", "금리 (%)", f"{country} {tenor}",
                                   key=f"foreign_rate_{country}_{tenor}")
             _chart_gap()
 
@@ -201,10 +235,10 @@ def page_foreign_rate():
             if short_t is None or "10Y" not in available:
                 continue
             view = _tenor_spread_view(country, "10Y", short_t, start_date, end_date)
-            flag = COUNTRY_FLAGS.get(country, "")
             label = f"10Y-{short_t}"
             with cols2[idx % 3]:
-                _plot_with_ma(view, f"{flag} {country} {label}", "bp", f"{country} {label}",
+                st.markdown(f"{_flag_html(country, 16)}**{country}**", unsafe_allow_html=True)
+                _plot_with_ma(view, f"{country} {label}", "bp", f"{country} {label}",
                               key=f"foreign_spread_{country}")
             idx += 1
             if idx % 3 == 0:
@@ -214,10 +248,10 @@ def page_foreign_rate():
         cols3 = st.columns(3)
         for i, (a, b) in enumerate(CROSS_COUNTRY_SPREADS):
             view = _cross_group_spread_view(_foreign_group_key(a), _foreign_group_key(b), "10Y", start_date, end_date)
-            flag_a, flag_b = COUNTRY_FLAGS.get(a, ""), COUNTRY_FLAGS.get(b, "")
             label = f"{a}-{b}"
             with cols3[i % 3]:
-                _plot_with_ma(view, f"{flag_a}{a}-{flag_b}{b} (10Y)", "bp", label, key=f"cross_spread_{label}")
+                st.markdown(f"{_flag_html(a, 16)}{a} − {_flag_html(b, 16)}{b}", unsafe_allow_html=True)
+                _plot_with_ma(view, f"{label} (10Y)", "bp", label, key=f"cross_spread_{label}")
 
 
 FX_FLAGS = {
@@ -284,6 +318,18 @@ COMMODITY_EMOJI = {
 }
 
 
+COMMODITY_CATEGORIES = {
+    "🔥 에너지": ["WTI", "브렌트", "두바이유", "천연가스", "에탄올"],
+    "🥇 귀금속": ["팔라듐", "백금", "금", "은"],
+    "🌾 음식": [
+        "KC HRW 밀", "미니 옥수수", "미니 콩", "미니 소맥", "옥수수", "대두유", "대두박", "귀리",
+        "쌀", "대두", "시카고 SRW 밀", "버터", "치즈", "3등급 우유", "4등급 우유", "비육우",
+        "무지방 건조우유", "돈육", "생우", "코코아", "커피", "오렌지주스", "설탕",
+    ],
+    "📊 기타": ["블룸버그 상품 지수", "다우 존스 부동산", "30 DAY FEDERAL FUNDS", "면화", "미국달러지수", "구리", "알루미늄"],
+}
+
+
 # ================================================================ 원자재
 def page_commodity():
     st.title("🛢️ 원자재")
@@ -292,15 +338,18 @@ def page_commodity():
     min_date, max_date = commodity_dates.min().date(), commodity_dates.max().date()
     start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="5Y")
 
-    available = [g for g in COMMODITY_ORDER if not df.loc[df["그룹"] == g].empty]
-    cols = st.columns(3)
-    for i, group in enumerate(available):
-        view = _series_history_view(group, start_date, end_date)
-        emoji = COMMODITY_EMOJI.get(group, "")
-        with cols[i % 3]:
-            _plot_with_ma(view, f"{emoji} {group}", "가격", f"{emoji} {group}", key=f"commodity_{group}")
-        if (i + 1) % 3 == 0:
-            _chart_gap()
+    for category, groups in COMMODITY_CATEGORIES.items():
+        available = [g for g in groups if not df.loc[df["그룹"] == g].empty]
+        if not available:
+            continue
+        st.subheader(category)
+        cols = st.columns(3)
+        for i, group in enumerate(available):
+            view = _series_history_view(group, start_date, end_date)
+            emoji = COMMODITY_EMOJI.get(group, "")
+            with cols[i % 3]:
+                _plot_with_ma(view, f"{emoji} {group}", "가격", f"{emoji} {group}", key=f"commodity_{group}")
+        _chart_gap()
 
 
 # ================================================================ 신용스프레드
@@ -446,6 +495,7 @@ def page_short():
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
+    st.Page(page_irs_detail, title="IRS", icon="🔁"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_fx, title="FX", icon="💱"),
     st.Page(page_commodity, title="원자재", icon="🛢️"),
