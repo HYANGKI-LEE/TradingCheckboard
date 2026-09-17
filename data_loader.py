@@ -44,6 +44,7 @@ SHEET_FX = "Info(FX)"
 SHEET_COMMODITY = "Info(원자재)"
 SHEET_IRS_DETAIL = "Info(IRS)"
 SHEET_FUTURES = "Info(선물)"
+SHEET_STOCK = "Info(주가)"
 
 # 국채선물 연결(3/5/10/30년): 그룹은 "선물{N}년", "만기" 자리에는 필드명(현재가/이론가/저평가/수정듀레이션/내재수익률)이 들어간다
 FUTURES_TENORS = ["3", "5", "10", "30"]
@@ -70,7 +71,7 @@ COMMODITY_ORDER = [
 
 FOREIGN_COUNTRIES_ORDER = [
     "미국", "독일", "영국", "프랑스", "이탈리아", "일본", "호주", "캐나다",
-    "인도", "인도네시아", "브라질", "멕시코", "남아공",
+    "인도", "인도네시아", "브라질", "멕시코",
 ]
 
 TENOR_ORDER = [
@@ -154,6 +155,10 @@ def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tup
     if sheet_hint == "원자재":
         name = _clean_commodity_name(title)
         return (name, None) if name else None
+    if sheet_hint == "주가":
+        return (title, None) if title else None
+    if title == "CP 4사평균 A1":
+        return ("ABCP A1 3개월", None)
     if title.startswith(_CURVE_PREFIX):
         name = title[len(_CURVE_PREFIX):].replace("(공모/무보증)", "")
         name = name.replace("금융채 ", "").replace(" ", "")
@@ -254,12 +259,16 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
             if SHEET_COMMODITY in wb.sheetnames else pd.DataFrame()
         df_irs_detail = _parse_sheet(wb[SHEET_IRS_DETAIL]) if SHEET_IRS_DETAIL in wb.sheetnames else pd.DataFrame()
         df_futures = _parse_sheet(wb[SHEET_FUTURES]) if SHEET_FUTURES in wb.sheetnames else pd.DataFrame()
+        df_stock = _parse_sheet(wb[SHEET_STOCK], sheet_hint="주가") if SHEET_STOCK in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
     df = pd.concat(
-        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures], ignore_index=True
+        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures, df_stock],
+        ignore_index=True,
     ).drop_duplicates(subset=["날짜", "그룹", "만기"])
+    # 인도네시아 2Y는 최근 값이 여러 영업일째 그대로 고정된 상태(비정상 캐리포워드)로 보여 제외
+    df = df[~((df["그룹"] == "인도네시아") & (df["만기"] == "2Y"))]
     df["날짜"] = pd.to_datetime(df["날짜"])
     _known_tenors = set(TENOR_ORDER) | set(IRS_ZERO_FWD_TENOR_ORDER)
     tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \

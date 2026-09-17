@@ -272,6 +272,16 @@ def page_irs_detail():
                                   key=f"irsdetail_{group}_{tenor}")
 
     with tab_spread:
+        st.markdown("#### 기준금리")
+        base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
+        base_rate = base_rate[(base_rate["날짜"].dt.date >= start_date) & (base_rate["날짜"].dt.date <= end_date)]
+        fig_base = go.Figure()
+        fig_base.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["값"], mode="lines", name="기준금리",
+                                       line=dict(color="gray", shape="hv", width=2)))
+        fig_base.update_layout(height=280, yaxis_title="%", margin=dict(t=20))
+        st.plotly_chart(fig_base, use_container_width=True, key="irs_spread_base_rate")
+
+        _chart_gap()
         cols = st.columns(3)
         i = 0
         for long_t, short_t in IRS_SPREAD_PAIRS:
@@ -282,6 +292,25 @@ def page_irs_detail():
             with cols[i % 3]:
                 _plot_with_ma(view, f"IRS {label}", "bp", label, key=f"irs_spread_{label}")
             i += 1
+
+        _chart_gap()
+        st.markdown("#### 커스텀 스프레드")
+        tenor_options = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in available_tenors]
+        col_a, col_b = st.columns(2)
+        with col_a:
+            tenor_a = st.selectbox("만기 A", tenor_options,
+                                    index=tenor_options.index("3Y") if "3Y" in tenor_options else 0,
+                                    key="irs_custom_a")
+        with col_b:
+            tenor_b = st.selectbox("만기 B", tenor_options,
+                                    index=tenor_options.index("1Y") if "1Y" in tenor_options else 0,
+                                    key="irs_custom_b")
+        if tenor_a != tenor_b:
+            custom_view = _tenor_spread_view("IRS", tenor_a, tenor_b, start_date, end_date)
+            _plot_with_ma(custom_view, f"IRS {tenor_a}-{tenor_b}", "bp", f"{tenor_a}-{tenor_b}",
+                          key="irs_custom_spread")
+        else:
+            st.caption("서로 다른 만기 2개를 선택해주세요.")
 
     with tab_fly:
         cols = st.columns(3)
@@ -556,6 +585,52 @@ def page_commodity():
         _chart_gap()
 
 
+def _yield_gap_data(start_date, end_date) -> pd.DataFrame:
+    per = df[df["그룹"] == "한국:PER-KRX:트레일링"][["날짜", "값"]].rename(columns={"값": "per"})
+    ktb3 = curve_history(df, "국고채", "3Y")[["날짜", "값"]].rename(columns={"값": "국고채 3년"})
+    merged = per.merge(ktb3, on="날짜", how="inner").sort_values("날짜")
+    merged["1/PER"] = (1 / merged["per"]) * 100
+    merged["갭"] = merged["1/PER"] - merged["국고채 3년"]
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+# ================================================================ 주식
+def page_stock():
+    st.title("📈 주식")
+
+    stock_dates = df.loc[df["그룹"] == "KOSPI", "날짜"]
+    min_date, max_date = stock_dates.min().date(), stock_dates.max().date()
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="stock", default="1Y")
+
+    (tab_yieldgap,) = st.tabs(["Yield Gap"])
+
+    with tab_yieldgap:
+        data = _yield_gap_data(start_date, end_date)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(x=data["날짜"], y=data["1/PER"], name="1/PER",
+                                       line=dict(color="black", width=2)))
+            fig1.add_trace(go.Scatter(x=data["날짜"], y=data["국고채 3년"], name="국고채 3년",
+                                       line=dict(color="#2980B9", width=2)))
+            fig1.update_layout(title="1/PER vs 국고채 3년", yaxis_title="%", height=420,
+                                legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
+            st.plotly_chart(fig1, use_container_width=True, key="stock_1overper")
+        with col2:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=data["날짜"], y=data["갭"], name="Yield Gap",
+                                       line=dict(color="black", width=2)))
+            fig2.add_hline(y=3, line_color="blue", line_dash="dash",
+                            annotation_text="적극매도", annotation_position="right")
+            fig2.add_hline(y=6, line_color="#D4AC0D", line_dash="dash",
+                            annotation_text="매수", annotation_position="right")
+            fig2.add_hline(y=8, line_color="red", line_dash="dash",
+                            annotation_text="적극매수", annotation_position="right")
+            fig2.update_layout(title="Yield Gap (1/PER - 국고채 3년)", yaxis_title="%p", height=420, margin=dict(t=40))
+            st.plotly_chart(fig2, use_container_width=True, key="stock_yieldgap")
+
+
 # ================================================================ 신용스프레드
 def page_credit():
     st.title("🏦 신용스프레드")
@@ -759,6 +834,51 @@ IRS_KTB_ALL_TENORS = ["1Y", "2Y", "3Y", "4Y", "5Y", "10Y", "20Y", "30Y"]
 IRS_FUTURES_PAIRS = [("3Y", "선물3년"), ("10Y", "선물10년")]
 
 
+def _yeojeonchae_bss_2y_view(start_date, end_date) -> pd.DataFrame:
+    """
+    여전채 AA- BSS 2Y = (여전채AA-2Y + (여전채AA-2Y - 여전채AA-1Y)) + (CD - IRS2Y) - (IRS2Y - IRS1Y), bp 환산(x100)
+    """
+    a = curve_history(df, "기타금융채AA-", "2Y")[["날짜", "값"]].rename(columns={"값": "yjc2"})
+    b = curve_history(df, "기타금융채AA-", "1Y")[["날짜", "값"]].rename(columns={"값": "yjc1"})
+    c = df[df["그룹"] == "CD"][["날짜", "값"]].rename(columns={"값": "cd"})
+    d = curve_history(df, "IRS", "2Y")[["날짜", "값"]].rename(columns={"값": "irs2"})
+    e = curve_history(df, "IRS", "1Y")[["날짜", "값"]].rename(columns={"값": "irs1"})
+    m = a.merge(b, on="날짜", how="inner").merge(c, on="날짜", how="inner") \
+        .merge(d, on="날짜", how="inner").merge(e, on="날짜", how="inner").sort_values("날짜")
+    m["값"] = ((m["yjc2"] + (m["yjc2"] - m["yjc1"])) + (m["cd"] - m["irs2"]) - (m["irs2"] - m["irs1"])) * 100
+    return m[(m["날짜"].dt.date >= start_date) & (m["날짜"].dt.date <= end_date)][["날짜", "값"]]
+
+
+def _abcp_view(start_date, end_date) -> pd.DataFrame:
+    hist = df[df["그룹"] == "ABCP A1 3개월"][["날짜", "값"]].sort_values("날짜")
+    return hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+
+
+def _bss_abcp_dual_chart(start_date, end_date):
+    bss = _yeojeonchae_bss_2y_view(start_date, end_date).rename(columns={"값": "bss"})
+    abcp = _abcp_view(start_date, end_date).rename(columns={"값": "abcp"})
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bss["날짜"], y=bss["bss"], name="여전채AA- BSS 2Y",
+                              line=dict(color="#C0392B", width=2)))
+    fig.add_trace(go.Scatter(x=abcp["날짜"], y=abcp["abcp"], name="ABCP A1 3개월 (우)",
+                              line=dict(color="#2980B9", width=1.6), yaxis="y2"))
+    fig.update_layout(
+        title="여전채AA- BSS 2Y vs ABCP A1 3개월", height=400,
+        yaxis=dict(title="bp"), yaxis2=dict(title="%", overlaying="y", side="right"),
+        legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
+    )
+    return fig
+
+
+def _bss_minus_abcp_view(start_date, end_date) -> pd.DataFrame:
+    """BSS(bp) - ABCP(%를 bp로 환산 = x100). 단위를 bp로 맞추기 위해 ABCP도 x100 처리."""
+    bss = _yeojeonchae_bss_2y_view(start_date, end_date).rename(columns={"값": "bss"})
+    abcp = _abcp_view(start_date, end_date).rename(columns={"값": "abcp"})
+    m = bss.merge(abcp, on="날짜", how="inner").sort_values("날짜")
+    m["값"] = m["bss"] - m["abcp"] * 100
+    return m[["날짜", "값"]]
+
+
 def _irs_ktb_vs_futures_dual_axis(start_date, end_date):
     ktb3 = _cross_group_spread_view("IRS", "국고채", "3Y", start_date, end_date)
     fut3 = _futures_richness_bp("선물3년")
@@ -783,7 +903,7 @@ def _irs_ktb_vs_futures_dual_axis(start_date, end_date):
 def page_relative_value():
     st.title("⚖️ Relative Value")
 
-    tab_valuation, tab_irsktb = st.tabs(["Valuation", "IRS-KTB"])
+    tab_valuation, tab_irsktb, tab_irsfut = st.tabs(["Valuation", "IRS-KTB", "IRS-선물"])
 
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
@@ -802,13 +922,26 @@ def page_relative_value():
                          key="rv_ktb_vs_fut")
 
         _chart_gap()
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(_bss_abcp_dual_chart(start_date, end_date), use_container_width=True, key="rv_bss_abcp")
+        with col4:
+            full_diff = _bss_minus_abcp_view(min_date, max_date)
+            avg = full_diff["값"].mean()
+            diff_view = _bss_minus_abcp_view(start_date, end_date)
+            diff_view = diff_view.assign(**_with_ma(diff_view["값"]))
+            _plot_with_ma(diff_view, "여전채AA- BSS 2Y - ABCP A1 3개월", "bp",
+                          "BSS-ABCP", key="rv_bss_minus_abcp", avg_line=avg)
+
+    with tab_irsfut:
+        start_date3, end_date3 = period_selector(min_date, max_date, key_prefix="rv_irsfut", default="1Y")
         st.markdown("#### IRS-선물내재수익률")
-        cols2 = st.columns(2)
+        cols3 = st.columns(2)
         for i, (irs_tenor, futures_group) in enumerate(IRS_FUTURES_PAIRS):
             full_history = _irs_vs_futures_yield_view(irs_tenor, futures_group, min_date, max_date)
             avg = full_history["값"].mean()
-            view = _irs_vs_futures_yield_view(irs_tenor, futures_group, start_date, end_date)
-            with cols2[i]:
+            view = _irs_vs_futures_yield_view(irs_tenor, futures_group, start_date3, end_date3)
+            with cols3[i]:
                 _plot_with_ma(view, f"IRS-선물내재수익률 {irs_tenor}", "bp", f"IRS-선물 {irs_tenor}",
                               key=f"rv_irsfut_{irs_tenor}", avg_line=avg)
 
@@ -846,6 +979,7 @@ nav = st.navigation([
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_fx, title="FX", icon="💱"),
     st.Page(page_commodity, title="원자재", icon="🛢️"),
+    st.Page(page_stock, title="주식", icon="📈"),
     st.Page(page_credit, title="신용스프레드", icon="🏦"),
     st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
     st.Page(page_short, title="단기금리", icon="📉"),
