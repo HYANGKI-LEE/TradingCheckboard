@@ -585,6 +585,12 @@ def page_commodity():
         _chart_gap()
 
 
+STOCK_INDEX_ORDER = [
+    "KOSPI", "KOSDAQ", "다우 산업", "S&P 500", "나스닥 종합", "나스닥 100",
+    "니케이 225", "상해종합", "CSI 300", "대만 가권", "항셍", "독일 DAX30", "프랑스 CAC40", "다우 종합",
+]
+
+
 def _yield_gap_data(start_date, end_date) -> pd.DataFrame:
     per = df[df["그룹"] == "한국:PER-KRX:트레일링"][["날짜", "값"]].rename(columns={"값": "per"})
     ktb3 = curve_history(df, "국고채", "3Y")[["날짜", "값"]].rename(columns={"값": "국고채 3년"})
@@ -602,7 +608,15 @@ def page_stock():
     min_date, max_date = stock_dates.min().date(), stock_dates.max().date()
     start_date, end_date = period_selector(min_date, max_date, key_prefix="stock", default="1Y")
 
-    (tab_yieldgap,) = st.tabs(["Yield Gap"])
+    tab_yieldgap, tab_indices = st.tabs(["Yield Gap", "주가추이"])
+
+    with tab_indices:
+        available = [g for g in STOCK_INDEX_ORDER if not df.loc[df["그룹"] == g].empty]
+        cols_idx = st.columns(3)
+        for i, group in enumerate(available):
+            view = _series_history_view(group, start_date, end_date)
+            with cols_idx[i % 3]:
+                _plot_with_ma(view, group, "지수", group, key=f"stock_index_{group}")
 
     with tab_yieldgap:
         data = _yield_gap_data(start_date, end_date)
