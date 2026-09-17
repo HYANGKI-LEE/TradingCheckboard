@@ -169,7 +169,7 @@ def page_domestic_rate():
     min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
     start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
 
-    tab_rates, tab_change, tab_spread = st.tabs(["Rates", "변동", "스프레드"])
+    tab_rates, tab_change, tab_spread, tab_futures = st.tabs(["Rates", "변동", "스프레드", "선물"])
 
     with tab_rates:
         cols = st.columns(2)
@@ -190,6 +190,24 @@ def page_domestic_rate():
             label = f"{long_t}-{short_t}"
             with cols2[i % 2]:
                 _plot_with_ma(view, f"국고채 {label} 스프레드", "bp", label, key=f"spread_{label}")
+
+    with tab_futures:
+        for label, futures_group in [("3년", "선물3년"), ("5년", "선물5년"), ("10년", "선물10년"), ("30년", "선물30년")]:
+            if df.loc[df["그룹"] == futures_group].empty:
+                continue
+            st.markdown(f"#### {label}국채선물")
+            price_view = _tenor_history_view(futures_group, "현재가", start_date, end_date)
+            richness_view = _futures_richness_bp(futures_group)
+            richness_view = richness_view.assign(**_with_ma(richness_view["값"]))
+            richness_view = richness_view[(richness_view["날짜"].dt.date >= start_date) &
+                                           (richness_view["날짜"].dt.date <= end_date)]
+            colf1, colf2 = st.columns(2)
+            with colf1:
+                _plot_with_ma(price_view, f"{label}국채선물 가격", "가격", f"{label}국채선물", key=f"futures_price_{futures_group}")
+            with colf2:
+                _plot_with_ma(richness_view, f"{label}국채선물 저평", "bp", f"{label}국채선물 저평",
+                              key=f"futures_rich_{futures_group}")
+            _chart_gap()
 
 
 IRS_SPREAD_PAIRS = [
@@ -309,25 +327,39 @@ def _foreign_group_key(display_name: str) -> str:
     return "국고채" if display_name == "한국" else display_name
 
 
+def _effective_latest_idx(vals: list) -> int:
+    """
+    마지막 몇 개 값이 그 앞 값과 똑같이 반복되면(당일 미갱신/캐리포워드) 그 구간을 건너뛰고
+    실제로 값이 바뀐 가장 최근 시점의 인덱스를 반환한다.
+    """
+    idx = len(vals) - 1
+    while idx > 0 and vals[idx] == vals[idx - 1]:
+        idx -= 1
+    return idx
+
+
 def _foreign_rate_change_table(tenor: str = "10Y") -> pd.DataFrame:
     rows = []
     for country in FOREIGN_COUNTRIES_ORDER:
-        hist = curve_history(df, country, tenor).sort_values("날짜")
+        hist = curve_history(df, country, tenor).sort_values("날짜").reset_index(drop=True)
         if len(hist) < 2:
             continue
-        latest_date = hist["날짜"].max().date()
+        idx = _effective_latest_idx(hist["값"].tolist())
+        latest_date = hist.loc[idx, "날짜"].date()
+        latest_val = hist.loc[idx, "값"]
+        prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
         min_d = hist["날짜"].min().date()
-        latest_val = hist.iloc[-1]["값"]
-        prev_val = hist.iloc[-2]["값"]
+        hist_upto = hist.loc[:idx]  # 유효 최신일 이후 데이터는 변동 계산에서 제외
 
         def chg(ref_date):
-            prior = hist[hist["날짜"].dt.date <= ref_date]
+            prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
             return round((latest_val - prior.iloc[-1]["값"]) * 100, 1) if not prior.empty else None
 
         rows.append({
             "국가": country,
+            "기준일": latest_date,
             "현재가(%)": round(latest_val, 3),
-            "전일대비(bp)": round((latest_val - prev_val) * 100, 1),
+            "전일대비(bp)": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
             "1W(bp)": chg(latest_date - pd.Timedelta(days=7)),
             "MTD(bp)": chg(_preset_to_start("MTD", min_d, latest_date)),
             "1M(bp)": chg(_preset_to_start("1M", min_d, latest_date)),
@@ -351,7 +383,23 @@ def page_foreign_rate():
 
     with tab_change:
         st.caption("만기: 10Y 기준")
-        st.dataframe(_foreign_rate_change_table("10Y"), use_container_width=True, hide_index=True)
+        change_table = _foreign_rate_change_table("10Y")
+        metric_options = ["전일대비(bp)", "1W(bp)", "MTD(bp)", "1M(bp)", "QTD(bp)", "YTD(bp)"]
+
+        col_table, col_bar = st.columns([2, 3])
+        with col_table:
+            st.dataframe(change_table, use_container_width=True, hide_index=True)
+        with col_bar:
+            metric = st.segmented_control("막대그래프 기준", metric_options, default="전일대비(bp)", key="foreign_change_metric") \
+                or "전일대비(bp)"
+            bar_df = change_table[["국가", metric]].dropna().sort_values(metric, ascending=True)
+            fig_bar = go.Figure(go.Bar(
+                x=bar_df[metric], y=bar_df["국가"], orientation="h",
+                marker_color="#159895", text=bar_df[metric], texttemplate="%{text:.1f}",
+                textposition="outside",
+            ))
+            fig_bar.update_layout(title=metric, height=max(320, 28 * len(bar_df)), margin=dict(t=40, r=40))
+            st.plotly_chart(fig_bar, use_container_width=True, key="foreign_change_bar")
 
     with tab_rates:
         for country in FOREIGN_COUNTRIES_ORDER:
@@ -457,23 +505,31 @@ COMMODITY_EMOJI = {
     "시카고 SRW 밀": "🌾", "버터": "🧈", "치즈": "🧀", "3등급 우유": "🥛", "4등급 우유": "🥛",
     "비육우": "🐄", "무지방 건조우유": "🥛", "돈육": "🐖", "생우": "🐂", "코코아": "🍫",
     "면화": "🧵", "미국달러지수": "💵", "커피": "☕", "오렌지주스": "🍊", "설탕": "🍬",
-    "금": "🥇", "은": "🥈", "구리": "🟠", "알루미늄": "⚙️",
+    "금": "🥇", "은": "🥈", "구리": "🟠", "알루미늄": "⚙️", "금은Ratio": "⚖️",
 }
 
 
 COMMODITY_CATEGORIES = {
-    "🔥 에너지": ["WTI", "브렌트", "두바이유", "천연가스", "에탄올"],
-    "🥇 귀금속": ["팔라듐", "백금", "금", "은"],
+    "🔥 에너지": ["WTI", "브렌트", "두바이유", "천연가스"],
+    "🥇 귀금속": ["금", "은", "금은Ratio", "구리", "백금", "팔라듐"],
     "🌾 음식": [
-        "KC HRW 밀", "미니 옥수수", "미니 콩", "미니 소맥", "옥수수", "대두유", "대두박", "귀리",
-        "쌀", "대두", "시카고 SRW 밀", "버터", "치즈", "3등급 우유", "4등급 우유", "비육우",
-        "무지방 건조우유", "돈육", "생우", "코코아", "커피", "오렌지주스", "설탕",
+        "KC HRW 밀", "시카고 SRW 밀", "옥수수", "쌀", "귀리", "대두",
+        "버터", "치즈", "돈육", "생우", "코코아", "커피", "설탕",
     ],
-    "📊 기타": ["블룸버그 상품 지수", "다우 존스 부동산", "30 DAY FEDERAL FUNDS", "면화", "미국달러지수", "구리", "알루미늄"],
+    "📊 기타": ["블룸버그 상품 지수", "다우 존스 부동산", "30 DAY FEDERAL FUNDS", "면화", "미국달러지수", "알루미늄"],
 }
 
 
 # ================================================================ 원자재
+def _commodity_ratio_view(a_group: str, b_group: str, start_date, end_date) -> pd.DataFrame:
+    a = df[df["그룹"] == a_group][["날짜", "값"]].rename(columns={"값": "a"})
+    b = df[df["그룹"] == b_group][["날짜", "값"]].rename(columns={"값": "b"})
+    merged = a.merge(b, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = merged["a"] / merged["b"]
+    merged = merged.assign(**_with_ma(merged["값"]))
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
 def page_commodity():
     st.title("🛢️ 원자재")
 
@@ -482,16 +538,21 @@ def page_commodity():
     start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
 
     for category, groups in COMMODITY_CATEGORIES.items():
-        available = [g for g in groups if not df.loc[df["그룹"] == g].empty]
+        available = [g for g in groups if g == "금은Ratio" or not df.loc[df["그룹"] == g].empty]
         if not available:
             continue
         st.subheader(category)
         cols = st.columns(3)
         for i, group in enumerate(available):
-            view = _series_history_view(group, start_date, end_date)
             emoji = COMMODITY_EMOJI.get(group, "")
+            if group == "금은Ratio":
+                view = _commodity_ratio_view("금", "은", start_date, end_date)
+                yaxis_title = "Ratio"
+            else:
+                view = _series_history_view(group, start_date, end_date)
+                yaxis_title = "가격"
             with cols[i % 3]:
-                _plot_with_ma(view, f"{emoji} {group}", "가격", f"{emoji} {group}", key=f"commodity_{group}")
+                _plot_with_ma(view, f"{emoji} {group}", yaxis_title, f"{emoji} {group}", key=f"commodity_{group}")
         _chart_gap()
 
 
@@ -694,18 +755,40 @@ def _bss_vs_futures_scatter(start_date, end_date):
 
 
 IRS_KTB_SPREAD_TENORS = ["1Y", "2Y", "3Y", "5Y", "10Y", "30Y"]
+IRS_KTB_ALL_TENORS = ["1Y", "2Y", "3Y", "4Y", "5Y", "10Y", "20Y", "30Y"]
 IRS_FUTURES_PAIRS = [("3Y", "선물3년"), ("10Y", "선물10년")]
+
+
+def _irs_ktb_vs_futures_dual_axis(start_date, end_date):
+    ktb3 = _cross_group_spread_view("IRS", "국고채", "3Y", start_date, end_date)
+    fut3 = _futures_richness_bp("선물3년")
+    fut3 = fut3[(fut3["날짜"].dt.date >= start_date) & (fut3["날짜"].dt.date <= end_date)]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ktb3["날짜"], y=ktb3["값"], name="IRS-KTB 3Y",
+                              line=dict(color="#C0392B", width=2)))
+    fig.add_trace(go.Scatter(x=fut3["날짜"], y=fut3["값"], name="3년선물 저평 (우)",
+                              line=dict(color="#AAB7C4", width=1.6), yaxis="y2"))
+    fig.add_hline(y=0, line_color="gray", line_width=1)
+    fig.update_layout(
+        title="IRS-KTB 3Y vs 3년 선물 저평", height=420,
+        yaxis=dict(title="(bp)"),
+        yaxis2=dict(title="(bp)", overlaying="y", side="right", autorange="reversed"),
+        legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
+    )
+    return fig
 
 
 # ================================================================ Relative Value
 def page_relative_value():
     st.title("⚖️ Relative Value")
 
-    (tab_valuation,) = st.tabs(["Valuation"])
+    tab_valuation, tab_irsktb = st.tabs(["Valuation", "IRS-KTB"])
+
+    irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
+    min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
 
     with tab_valuation:
-        irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
-        min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
         start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="1Y")
 
         col1, col2 = st.columns(2)
@@ -715,15 +798,8 @@ def page_relative_value():
             st.image(str(ASSETS_DIR / "trilemma_diagram.png"), use_container_width=True)
 
         _chart_gap()
-        st.markdown("#### IRS-KTB 추이")
-        cols = st.columns(3)
-        for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
-            full_history = _cross_group_spread_view("IRS", "국고채", tenor, min_date, max_date)
-            avg = full_history["값"].mean()
-            view = _cross_group_spread_view("IRS", "국고채", tenor, start_date, end_date)
-            with cols[i % 3]:
-                _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", key=f"rv_irsktb_{tenor}",
-                              avg_line=avg)
+        st.plotly_chart(_irs_ktb_vs_futures_dual_axis(start_date, end_date), use_container_width=True,
+                         key="rv_ktb_vs_fut")
 
         _chart_gap()
         st.markdown("#### IRS-선물내재수익률")
@@ -735,6 +811,31 @@ def page_relative_value():
             with cols2[i]:
                 _plot_with_ma(view, f"IRS-선물내재수익률 {irs_tenor}", "bp", f"IRS-선물 {irs_tenor}",
                               key=f"rv_irsfut_{irs_tenor}", avg_line=avg)
+
+    with tab_irsktb:
+        start_date2, end_date2 = period_selector(min_date, max_date, key_prefix="rv_irsktb", default="1Y")
+
+        cols = st.columns(3)
+        for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
+            full_history = _cross_group_spread_view("IRS", "국고채", tenor, min_date, max_date)
+            avg = full_history["값"].mean()
+            view = _cross_group_spread_view("IRS", "국고채", tenor, start_date2, end_date2)
+            with cols[i % 3]:
+                _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", key=f"rv_irsktb_{tenor}",
+                              avg_line=avg)
+
+        _chart_gap()
+        st.markdown("#### 만기 추가")
+        extra_tenors = st.multiselect("추가로 볼 만기 선택", IRS_KTB_ALL_TENORS, default=[], key="rv_irsktb_extra")
+        if extra_tenors:
+            cols_extra = st.columns(3)
+            for i, tenor in enumerate(extra_tenors):
+                full_history = _cross_group_spread_view("IRS", "국고채", tenor, min_date, max_date)
+                avg = full_history["값"].mean()
+                view = _cross_group_spread_view("IRS", "국고채", tenor, start_date2, end_date2)
+                with cols_extra[i % 3]:
+                    _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}",
+                                  key=f"rv_irsktb_extra_{tenor}", avg_line=avg)
 
 
 # ================================================================ 세로 사이드바 내비게이션
