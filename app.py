@@ -789,15 +789,11 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 
 
 def _futures_richness_bp(futures_group: str) -> pd.DataFrame:
-    """
-    국채선물 가격 저평가(포인트)를 수익률(bp)로 환산: -(저평가/현재가)/수정듀레이션 * 10000
-    (저평가가 음수 = 선물가격이 이론가보다 낮음 = 선물이 시장 대비 싸게(cheap) 거래 = 수익률 환산시 양(+)의 저평)
-    """
-    price = curve_history(df, futures_group, "현재가")[["날짜", "값"]].rename(columns={"값": "price"})
+    """국채선물 가격 저평가(포인트)를 수익률(bp)로 환산: (저평가 * 100) / 수정듀레이션."""
     cheap = curve_history(df, futures_group, "저평가")[["날짜", "값"]].rename(columns={"값": "cheap"})
     dur = curve_history(df, futures_group, "수정듀레이션")[["날짜", "값"]].rename(columns={"값": "dur"})
-    merged = price.merge(cheap, on="날짜", how="inner").merge(dur, on="날짜", how="inner").sort_values("날짜")
-    merged["값"] = -(merged["cheap"] / merged["price"]) / merged["dur"] * 10000
+    merged = cheap.merge(dur, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = (merged["cheap"] * 100) / merged["dur"]
     return merged[["날짜", "값"]]
 
 
