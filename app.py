@@ -856,7 +856,7 @@ def _futures_implied_vs_irs_and_richness(start_date, end_date):
     fig.update_layout(
         title="선물내재수익률-IRS 3년 vs 3년선물 저평", height=420,
         yaxis=dict(title="(bp)"),
-        yaxis2=dict(title="(bp)", overlaying="y", side="right", autorange="reversed"),
+        yaxis2=dict(title="(bp)", overlaying="y", side="right"),
         legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
     )
     return fig
@@ -926,7 +926,7 @@ def _irs_ktb_vs_futures_dual_axis(start_date, end_date):
     fig.update_layout(
         title="IRS-KTB 3Y vs 3년 선물 저평", height=420,
         yaxis=dict(title="(bp)"),
-        yaxis2=dict(title="(bp)", overlaying="y", side="right", autorange="reversed"),
+        yaxis2=dict(title="(bp)", overlaying="y", side="right"),
         legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
     )
     return fig
