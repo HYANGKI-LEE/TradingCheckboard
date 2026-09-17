@@ -839,13 +839,13 @@ def _bss_vs_futures_scatter(start_date, end_date):
                                   name=f"현재 ({latest['날짜']:%Y-%m-%d})"))
 
     fig.update_layout(title="BSS와 선물 저평", xaxis_title="IRS - KTB 3년 (bp)",
-                       yaxis=dict(title="3년 선물 저평(bp)", autorange="reversed"),
+                       yaxis_title="3년 선물 저평(bp)",
                        height=480, showlegend=False, margin=dict(t=40))
     return fig
 
 
 def _futures_implied_vs_irs_and_richness(start_date, end_date):
-    """선물내재수익률(3Y) - IRS(3Y), 그리고 3년선물 저평을 한 차트에."""
+    """선물내재수익률(3Y) - IRS(3Y), 그리고 3년선물 저평을 한 차트에 (저평은 우측 반전축)."""
     implied_vs_irs = _irs_vs_futures_yield_view("3Y", "선물3년", start_date, end_date).copy()
     implied_vs_irs["값"] = -implied_vs_irs["값"]  # IRS-선물내재수익률의 부호를 뒤집어 선물내재수익률-IRS로
     richness = _futures_richness_bp("선물3년")
@@ -854,11 +854,15 @@ def _futures_implied_vs_irs_and_richness(start_date, end_date):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=implied_vs_irs["날짜"], y=implied_vs_irs["값"], name="선물내재수익률-IRS 3년",
                               line=dict(color="#C0392B", width=2)))
-    fig.add_trace(go.Scatter(x=richness["날짜"], y=richness["값"], name="3년선물 저평",
-                              line=dict(color="#AAB7C4", width=1.6)))
+    fig.add_trace(go.Scatter(x=richness["날짜"], y=richness["값"], name="3년선물 저평 (우)",
+                              line=dict(color="#AAB7C4", width=1.6), yaxis="y2"))
     fig.add_hline(y=0, line_color="gray", line_width=1)
-    fig.update_layout(title="선물내재수익률-IRS 3년 vs 3년선물 저평", height=420, yaxis_title="(bp)",
-                       legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
+    fig.update_layout(
+        title="선물내재수익률-IRS 3년 vs 3년선물 저평", height=420,
+        yaxis=dict(title="(bp)"),
+        yaxis2=dict(title="(bp)", overlaying="y", side="right", autorange="reversed"),
+        legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
+    )
     return fig
 
 
