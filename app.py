@@ -84,13 +84,17 @@ def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y"):
 MA_COLORS = {20: "#E67E22", 60: "#27AE60", 120: "#2980B9", 200: "#8E44AD"}
 
 
-def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, key: str):
+def _plot_with_ma(view: pd.DataFrame, title: str, yaxis_title: str, name: str, key: str, avg_line: float | None = None):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=name,
                               line=dict(width=3, color="black")))
     for w in MA_WINDOWS:
         fig.add_trace(go.Scatter(x=view["날짜"], y=view[f"MA{w}"], mode="lines",
                                   name=f"MA{w}", line=dict(width=1.5, color=MA_COLORS[w])))
+    if avg_line is not None:
+        fig.add_hline(y=avg_line, line_dash="dash", line_color="black", line_width=1.2,
+                      annotation_text=f"장기평균 {avg_line:.1f}", annotation_position="top left",
+                      annotation_font_size=10)
     fig.update_layout(title=title, height=360, yaxis_title=yaxis_title,
                        legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
     st.plotly_chart(fig, use_container_width=True, key=key)
@@ -611,7 +615,7 @@ def _bss_vs_futures_scatter():
                                   name=f"현재 ({latest['날짜']:%Y-%m-%d})"))
 
     fig.update_layout(title="BSS와 선물 저평 (최근 1년)", xaxis_title="IRS - KTB 3년 (bp)",
-                       yaxis_title="3년 선물 저평(bp)", height=430, showlegend=False, margin=dict(t=40))
+                       yaxis_title="3년 선물 저평(bp)", height=480, showlegend=False, margin=dict(t=40))
     return fig
 
 
@@ -640,9 +644,12 @@ def page_relative_value():
 
         cols = st.columns(3)
         for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
+            full_history = _cross_group_spread_view("IRS", "국고채", tenor, min_date, max_date)
+            avg = full_history["값"].mean()
             view = _cross_group_spread_view("IRS", "국고채", tenor, start_date, end_date)
             with cols[i % 3]:
-                _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", key=f"rv_irsktb_{tenor}")
+                _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", key=f"rv_irsktb_{tenor}",
+                              avg_line=avg)
 
         _chart_gap()
         st.markdown("#### IRS-선물내재수익률")
@@ -656,9 +663,9 @@ def page_relative_value():
 
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
-    st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
     st.Page(page_irs_detail, title="IRS", icon="🔁"),
+    st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_fx, title="FX", icon="💱"),
     st.Page(page_commodity, title="원자재", icon="🛢️"),
