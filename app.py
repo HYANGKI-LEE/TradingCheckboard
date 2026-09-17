@@ -124,15 +124,52 @@ def _cross_group_spread_view(group_a: str, group_b: str, tenor: str, start_date,
     return spread_df[(spread_df["날짜"].dt.date >= start_date) & (spread_df["날짜"].dt.date <= end_date)]
 
 
+# 회사채/여전채는 등급별 커브가 여러 개라 대표로 AA- 사용. "여전채"는 원본 데이터의 "기타금융채" 그룹으로 매핑함
+# (카드채는 별도 그룹이라 "여전채"는 카드채를 제외한 여신전문금융회사채 커브로 간주) - 다르면 알려주세요.
+DOMESTIC_CHANGE_SERIES = [
+    ("통안2년", "통안채", "2Y"),
+    ("국고3년", "국고채", "3Y"),
+    ("국고10년", "국고채", "10Y"),
+    ("IRS1년", "IRS", "1Y"),
+    ("IRS2년", "IRS", "2Y"),
+    ("회사채AA-2년", "회사채AA-", "2Y"),
+    ("여전채AA-2년", "기타금융채AA-", "2Y"),
+]
+
+
+def _change_since_start_view(group: str, tenor: str, start_date, end_date) -> pd.DataFrame:
+    """선택 기간 시작일 값 대비 변동(bp)."""
+    hist = curve_history(df, group, tenor)
+    hist = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)].sort_values("날짜").copy()
+    if hist.empty:
+        return hist.assign(변동=[])
+    hist["변동"] = (hist["값"] - hist["값"].iloc[0]) * 100
+    return hist
+
+
+def _plot_change_multi(series_list: list[tuple[str, str, str]], start_date, end_date, title: str, key: str):
+    fig = go.Figure()
+    for label, group, tenor in series_list:
+        view = _change_since_start_view(group, tenor, start_date, end_date)
+        if view.empty:
+            continue
+        fig.add_trace(go.Scatter(x=view["날짜"], y=view["변동"], mode="lines+markers", name=label,
+                                  line=dict(width=2), marker=dict(size=4)))
+    fig.add_hline(y=0, line_color="gray", line_width=1)
+    fig.update_layout(title=title, yaxis_title="(bp)", height=460,
+                       legend=dict(orientation="h", y=-0.22), margin=dict(t=40))
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+
 # ================================================================ 국내금리
 def page_domestic_rate():
     st.title("🏛️ 국내금리")
 
     govt_dates = df.loc[df["그룹"] == "국고채", "날짜"]
     min_date, max_date = govt_dates.min().date(), govt_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="5Y")
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
 
-    tab_rates, tab_spread = st.tabs(["Rates", "스프레드"])
+    tab_rates, tab_change, tab_spread = st.tabs(["Rates", "변동", "스프레드"])
 
     with tab_rates:
         cols = st.columns(2)
@@ -140,6 +177,11 @@ def page_domestic_rate():
             view = _tenor_history_view("국고채", tenor, start_date, end_date)
             with cols[i % 2]:
                 _plot_with_ma(view, f"국고채 {tenor}", "금리 (%)", f"국고채 {tenor}", key=f"rate_{tenor}")
+
+    with tab_change:
+        change_start, change_end = period_selector(min_date, max_date, key_prefix="domestic_change", default="YTD")
+        _plot_change_multi(DOMESTIC_CHANGE_SERIES, change_start, change_end,
+                            "주요금리 변동 추이", key="domestic_change_chart")
 
     with tab_spread:
         cols2 = st.columns(2)
@@ -192,7 +234,7 @@ def page_irs_detail():
 
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="5Y")
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
     available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
     tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
@@ -267,15 +309,49 @@ def _foreign_group_key(display_name: str) -> str:
     return "국고채" if display_name == "한국" else display_name
 
 
+def _foreign_rate_change_table(tenor: str = "10Y") -> pd.DataFrame:
+    rows = []
+    for country in FOREIGN_COUNTRIES_ORDER:
+        hist = curve_history(df, country, tenor).sort_values("날짜")
+        if len(hist) < 2:
+            continue
+        latest_date = hist["날짜"].max().date()
+        min_d = hist["날짜"].min().date()
+        latest_val = hist.iloc[-1]["값"]
+        prev_val = hist.iloc[-2]["값"]
+
+        def chg(ref_date):
+            prior = hist[hist["날짜"].dt.date <= ref_date]
+            return round((latest_val - prior.iloc[-1]["값"]) * 100, 1) if not prior.empty else None
+
+        rows.append({
+            "국가": country,
+            "현재가(%)": round(latest_val, 3),
+            "전일대비(bp)": round((latest_val - prev_val) * 100, 1),
+            "1W(bp)": chg(latest_date - pd.Timedelta(days=7)),
+            "MTD(bp)": chg(_preset_to_start("MTD", min_d, latest_date)),
+            "1M(bp)": chg(_preset_to_start("1M", min_d, latest_date)),
+            "QTD(bp)": chg(_preset_to_start("QTD", min_d, latest_date)),
+            "YTD(bp)": chg(_preset_to_start("YTD", min_d, latest_date)),
+        })
+    return pd.DataFrame(rows)
+
+
 # ================================================================ 해외금리
 def page_foreign_rate():
     st.title("🌍 해외금리")
 
     foreign_dates = df.loc[df["그룹"].isin(FOREIGN_COUNTRIES_ORDER), "날짜"]
     min_date, max_date = foreign_dates.min().date(), foreign_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="5Y")
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="1Y")
 
-    tab_rates, tab_spread_period, tab_spread_country = st.tabs(["Rates", "스프레드(기간)", "스프레드(국가간)"])
+    tab_change, tab_rates, tab_spread_period, tab_spread_country = st.tabs(
+        ["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"]
+    )
+
+    with tab_change:
+        st.caption("만기: 10Y 기준")
+        st.dataframe(_foreign_rate_change_table("10Y"), use_container_width=True, hide_index=True)
 
     with tab_rates:
         for country in FOREIGN_COUNTRIES_ORDER:
@@ -361,7 +437,7 @@ def page_fx():
     fx_groups = [g for g, is_cross in FX_ORDER if not is_cross]
     fx_dates = df.loc[df["그룹"].isin(fx_groups), "날짜"]
     min_date, max_date = fx_dates.min().date(), fx_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="5Y")
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="1Y")
 
     cols = st.columns(3)
     for i, (group, is_cross) in enumerate(FX_ORDER):
@@ -403,7 +479,7 @@ def page_commodity():
 
     commodity_dates = df.loc[df["그룹"].isin(COMMODITY_ORDER), "날짜"]
     min_date, max_date = commodity_dates.min().date(), commodity_dates.max().date()
-    start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="5Y")
+    start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
 
     for category, groups in COMMODITY_CATEGORIES.items():
         available = [g for g in groups if not df.loc[df["그룹"] == g].empty]
@@ -584,15 +660,13 @@ def _irs_vs_futures_yield_view(irs_tenor: str, futures_group: str, start_date, e
     return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
 
-def _bss_vs_futures_scatter():
+def _bss_vs_futures_scatter(start_date, end_date):
     bss = credit_spread(df, "IRS", "국고채")
     bss3 = bss[bss["만기"] == "3Y"][["날짜", "스프레드_bp"]].rename(columns={"스프레드_bp": "x"})
     fut3 = _futures_richness_bp("선물3년").rename(columns={"값": "y"})
     merged = bss3.merge(fut3, on="날짜", how="inner").sort_values("날짜")
 
-    max_date = merged["날짜"].max()
-    start = pd.Timestamp(max_date) - pd.DateOffset(years=1)
-    view = merged[merged["날짜"] >= start]
+    view = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
     fig = go.Figure()
     if len(view) >= 2:
@@ -614,7 +688,7 @@ def _bss_vs_futures_scatter():
                                               line=dict(width=1, color="black")),
                                   name=f"현재 ({latest['날짜']:%Y-%m-%d})"))
 
-    fig.update_layout(title="BSS와 선물 저평 (최근 1년)", xaxis_title="IRS - KTB 3년 (bp)",
+    fig.update_layout(title="BSS와 선물 저평", xaxis_title="IRS - KTB 3년 (bp)",
                        yaxis_title="3년 선물 저평(bp)", height=480, showlegend=False, margin=dict(t=40))
     return fig
 
@@ -630,18 +704,18 @@ def page_relative_value():
     (tab_valuation,) = st.tabs(["Valuation"])
 
     with tab_valuation:
+        irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
+        min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="1Y")
+
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(_bss_vs_futures_scatter(), use_container_width=True, key="rv_scatter")
+            st.plotly_chart(_bss_vs_futures_scatter(start_date, end_date), use_container_width=True, key="rv_scatter")
         with col2:
             st.image(str(ASSETS_DIR / "trilemma_diagram.png"), use_container_width=True)
 
         _chart_gap()
         st.markdown("#### IRS-KTB 추이")
-        irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
-        min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
-        start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="5Y")
-
         cols = st.columns(3)
         for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
             full_history = _cross_group_spread_view("IRS", "국고채", tenor, min_date, max_date)
@@ -655,10 +729,12 @@ def page_relative_value():
         st.markdown("#### IRS-선물내재수익률")
         cols2 = st.columns(2)
         for i, (irs_tenor, futures_group) in enumerate(IRS_FUTURES_PAIRS):
+            full_history = _irs_vs_futures_yield_view(irs_tenor, futures_group, min_date, max_date)
+            avg = full_history["값"].mean()
             view = _irs_vs_futures_yield_view(irs_tenor, futures_group, start_date, end_date)
             with cols2[i]:
                 _plot_with_ma(view, f"IRS-선물내재수익률 {irs_tenor}", "bp", f"IRS-선물 {irs_tenor}",
-                              key=f"rv_irsfut_{irs_tenor}")
+                              key=f"rv_irsfut_{irs_tenor}", avg_line=avg)
 
 
 # ================================================================ 세로 사이드바 내비게이션
