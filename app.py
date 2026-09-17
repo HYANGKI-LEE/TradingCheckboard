@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -552,8 +555,108 @@ def page_short():
     st.dataframe(merged.head(20).reset_index(drop=True), use_container_width=True)
 
 
+ASSETS_DIR = Path(__file__).parent / "assets"
+
+
+def _futures_richness_bp(futures_group: str) -> pd.DataFrame:
+    """
+    국채선물 가격 저평가(포인트)를 수익률(bp)로 환산: -(저평가/현재가)/수정듀레이션 * 10000
+    (저평가가 음수 = 선물가격이 이론가보다 낮음 = 선물이 시장 대비 싸게(cheap) 거래 = 수익률 환산시 양(+)의 저평)
+    """
+    price = curve_history(df, futures_group, "현재가")[["날짜", "값"]].rename(columns={"값": "price"})
+    cheap = curve_history(df, futures_group, "저평가")[["날짜", "값"]].rename(columns={"값": "cheap"})
+    dur = curve_history(df, futures_group, "수정듀레이션")[["날짜", "값"]].rename(columns={"값": "dur"})
+    merged = price.merge(cheap, on="날짜", how="inner").merge(dur, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = -(merged["cheap"] / merged["price"]) / merged["dur"] * 10000
+    return merged[["날짜", "값"]]
+
+
+def _irs_vs_futures_yield_view(irs_tenor: str, futures_group: str, start_date, end_date) -> pd.DataFrame:
+    a = curve_history(df, "IRS", irs_tenor)[["날짜", "값"]].rename(columns={"값": "irs"})
+    b = curve_history(df, futures_group, "내재수익률")[["날짜", "값"]].rename(columns={"값": "fut"})
+    merged = a.merge(b, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = (merged["irs"] - merged["fut"]) * 100
+    merged = merged.assign(**_with_ma(merged["값"]))
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+def _bss_vs_futures_scatter():
+    bss = credit_spread(df, "IRS", "국고채")
+    bss3 = bss[bss["만기"] == "3Y"][["날짜", "스프레드_bp"]].rename(columns={"스프레드_bp": "x"})
+    fut3 = _futures_richness_bp("선물3년").rename(columns={"값": "y"})
+    merged = bss3.merge(fut3, on="날짜", how="inner").sort_values("날짜")
+
+    max_date = merged["날짜"].max()
+    start = pd.Timestamp(max_date) - pd.DateOffset(years=1)
+    view = merged[merged["날짜"] >= start]
+
+    fig = go.Figure()
+    if len(view) >= 2:
+        coeffs = np.polyfit(view["x"], view["y"], 1)
+        xs = np.linspace(view["x"].min(), view["x"].max(), 50)
+        ys = coeffs[0] * xs + coeffs[1]
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#2980B9", width=2),
+                                  name="회귀선", hoverinfo="skip"))
+
+    hist = view.iloc[:-1] if len(view) > 0 else view
+    fig.add_trace(go.Scatter(x=hist["x"], y=hist["y"], mode="markers",
+                              marker=dict(color="gray", size=8, opacity=0.35, line=dict(width=0)),
+                              name="일별", hovertext=hist["날짜"].dt.strftime("%Y-%m-%d")))
+
+    if len(view) > 0:
+        latest = view.iloc[-1]
+        fig.add_trace(go.Scatter(x=[latest["x"]], y=[latest["y"]], mode="markers",
+                                  marker=dict(color="red", size=14, symbol="triangle-up",
+                                              line=dict(width=1, color="black")),
+                                  name=f"현재 ({latest['날짜']:%Y-%m-%d})"))
+
+    fig.update_layout(title="BSS와 선물 저평 (최근 1년)", xaxis_title="IRS - KTB 3년 (bp)",
+                       yaxis_title="3년 선물 저평(bp)", height=430, showlegend=False, margin=dict(t=40))
+    return fig
+
+
+IRS_KTB_SPREAD_TENORS = ["1Y", "2Y", "3Y", "5Y", "10Y", "30Y"]
+IRS_FUTURES_PAIRS = [("3Y", "선물3년"), ("10Y", "선물10년")]
+
+
+# ================================================================ Relative Value
+def page_relative_value():
+    st.title("⚖️ Relative Value")
+
+    (tab_valuation,) = st.tabs(["Valuation"])
+
+    with tab_valuation:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(_bss_vs_futures_scatter(), use_container_width=True, key="rv_scatter")
+        with col2:
+            st.image(str(ASSETS_DIR / "trilemma_diagram.png"), use_container_width=True)
+
+        _chart_gap()
+        st.markdown("#### IRS-KTB 추이")
+        irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
+        min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="rv", default="5Y")
+
+        cols = st.columns(3)
+        for i, tenor in enumerate(IRS_KTB_SPREAD_TENORS):
+            view = _cross_group_spread_view("IRS", "국고채", tenor, start_date, end_date)
+            with cols[i % 3]:
+                _plot_with_ma(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", key=f"rv_irsktb_{tenor}")
+
+        _chart_gap()
+        st.markdown("#### IRS-선물내재수익률")
+        cols2 = st.columns(2)
+        for i, (irs_tenor, futures_group) in enumerate(IRS_FUTURES_PAIRS):
+            view = _irs_vs_futures_yield_view(irs_tenor, futures_group, start_date, end_date)
+            with cols2[i]:
+                _plot_with_ma(view, f"IRS-선물내재수익률 {irs_tenor}", "bp", f"IRS-선물 {irs_tenor}",
+                              key=f"rv_irsfut_{irs_tenor}")
+
+
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
+    st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
     st.Page(page_irs_detail, title="IRS", icon="🔁"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
