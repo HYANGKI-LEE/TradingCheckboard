@@ -789,11 +789,11 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 
 
 def _futures_richness_bp(futures_group: str) -> pd.DataFrame:
-    """국채선물 가격 저평가(포인트)를 수익률(bp)로 환산: (저평가 * 100) / 수정듀레이션."""
+    """국채선물 가격 저평가(포인트)를 수익률(bp)로 환산: -(저평가 * 100) / 수정듀레이션."""
     cheap = curve_history(df, futures_group, "저평가")[["날짜", "값"]].rename(columns={"값": "cheap"})
     dur = curve_history(df, futures_group, "수정듀레이션")[["날짜", "값"]].rename(columns={"값": "dur"})
     merged = cheap.merge(dur, on="날짜", how="inner").sort_values("날짜")
-    merged["값"] = (merged["cheap"] * 100) / merged["dur"]
+    merged["값"] = -(merged["cheap"] * 100) / merged["dur"]
     return merged[["날짜", "값"]]
 
 
