@@ -143,30 +143,90 @@ def page_domestic_rate():
                 _plot_with_ma(view, f"국고채 {label} 스프레드", "bp", label, key=f"spread_{label}")
 
 
-IRS_DETAIL_SUBTABS = [("Par rate", "IRS"), ("Zero rate", "IRS_ZERO"), ("Fwd rate", "IRS_FWD3M")]
+IRS_SPREAD_PAIRS = [
+    ("9M", "6M"), ("1Y", "6M"), ("1.5Y", "6M"), ("2Y", "6M"),
+    ("1Y", "9M"), ("1.5Y", "9M"), ("2Y", "9M"),
+    ("1.5Y", "1Y"), ("2Y", "1Y"), ("3Y", "1Y"),
+    ("2Y", "1.5Y"), ("3Y", "1.5Y"),
+    ("3Y", "2Y"), ("5Y", "2Y"), ("10Y", "2Y"),
+    ("5Y", "3Y"),
+    ("5Y", "4Y"),
+    ("6Y", "5Y"), ("10Y", "5Y"),
+    ("10Y", "9Y"),
+    ("12Y", "10Y"),
+]
+
+IRS_BUTTERFLIES = [
+    # 2년 이하 단기구간: 가능한 조합 전부
+    ("6M", "9M", "1Y"), ("6M", "9M", "1.5Y"), ("6M", "9M", "2Y"),
+    ("6M", "1Y", "1.5Y"), ("6M", "1Y", "2Y"), ("6M", "1.5Y", "2Y"),
+    ("9M", "1Y", "1.5Y"), ("9M", "1Y", "2Y"), ("9M", "1.5Y", "2Y"),
+    ("1Y", "1.5Y", "2Y"),
+    # 3년 이상: 우선 지정된 조합만
+    ("1Y", "2Y", "3Y"), ("2Y", "3Y", "4Y"), ("3Y", "4Y", "5Y"),
+    ("1Y", "3Y", "10Y"), ("2Y", "5Y", "10Y"), ("3Y", "5Y", "10Y"), ("10Y", "20Y", "30Y"),
+]
 
 
-# ================================================================ IRS (Par/Zero/Fwd)
+def _irs_butterfly_view(short_t: str, mid_t: str, long_t: str, start_date, end_date) -> pd.DataFrame:
+    """나비형 스프레드 = IRS(단기) + IRS(장기) - IRS(중기), bp. 예: 3-5-10 = 3Y+10Y-5Y."""
+    a = curve_history(df, "IRS", short_t)[["날짜", "값"]].rename(columns={"값": "short"})
+    b = curve_history(df, "IRS", mid_t)[["날짜", "값"]].rename(columns={"값": "mid"})
+    c = curve_history(df, "IRS", long_t)[["날짜", "값"]].rename(columns={"값": "long"})
+    merged = a.merge(b, on="날짜", how="inner").merge(c, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = (merged["short"] + merged["long"] - merged["mid"]) * 100
+    merged = merged.assign(**_with_ma(merged["값"]))
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+# ================================================================ IRS (Par/스프레드/Zero/Fwd/버터플라이)
 def page_irs_detail():
     st.title("🔁 IRS")
 
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
     start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="5Y")
+    available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
-    tabs = st.tabs([label for label, _ in IRS_DETAIL_SUBTABS])
-    for tab, (label, group) in zip(tabs, IRS_DETAIL_SUBTABS):
+    tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
+        ["Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"]
+    )
+
+    for tab, label, group in [(tab_par, "Par rate", "IRS"), (tab_zero, "Zero rate", "IRS_ZERO"),
+                               (tab_fwd, "Fwd rate", "IRS_FWD3M")]:
         with tab:
-            available = set(df.loc[df["그룹"] == group, "만기"].dropna().astype(str).unique())
-            tenors = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in available]
+            avail = set(df.loc[df["그룹"] == group, "만기"].dropna().astype(str).unique())
+            tenors = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in avail]
             cols = st.columns(3)
             for i, tenor in enumerate(tenors):
                 view = _tenor_history_view(group, tenor, start_date, end_date)
                 with cols[i % 3]:
                     _plot_with_ma(view, f"{label} {tenor}", "%", f"{label} {tenor}",
                                   key=f"irsdetail_{group}_{tenor}")
-                if (i + 1) % 3 == 0:
-                    _chart_gap()
+
+    with tab_spread:
+        cols = st.columns(3)
+        i = 0
+        for long_t, short_t in IRS_SPREAD_PAIRS:
+            if long_t not in available_tenors or short_t not in available_tenors:
+                continue
+            view = _tenor_spread_view("IRS", long_t, short_t, start_date, end_date)
+            label = f"{short_t}-{long_t}"
+            with cols[i % 3]:
+                _plot_with_ma(view, f"IRS {label}", "bp", label, key=f"irs_spread_{label}")
+            i += 1
+
+    with tab_fly:
+        cols = st.columns(3)
+        i = 0
+        for short_t, mid_t, long_t in IRS_BUTTERFLIES:
+            if not all(t in available_tenors for t in (short_t, mid_t, long_t)):
+                continue
+            view = _irs_butterfly_view(short_t, mid_t, long_t, start_date, end_date)
+            label = f"{short_t}-{mid_t}-{long_t}"
+            with cols[i % 3]:
+                _plot_with_ma(view, f"IRS 버터플라이 {label}", "bp", label, key=f"irs_fly_{label}")
+            i += 1
 
 
 FOREIGN_RATE_PREFERRED = ["2Y", "10Y", "30Y"]

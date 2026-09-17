@@ -43,6 +43,12 @@ SHEET_FOREIGN = "Info(해외금리)"
 SHEET_FX = "Info(FX)"
 SHEET_COMMODITY = "Info(원자재)"
 SHEET_IRS_DETAIL = "Info(IRS)"
+SHEET_FUTURES = "Info(선물)"
+
+# 국채선물 연결(3/5/10/30년): 그룹은 "선물{N}년", "만기" 자리에는 필드명(현재가/이론가/저평가/수정듀레이션/내재수익률)이 들어간다
+FUTURES_TENORS = ["3", "5", "10", "30"]
+FUTURES_FIELDS = ["현재가", "이론가", "저평가", "수정듀레이션", "내재수익률"]
+_FUTURES_RE = re.compile(r"^(\d+)년국채 연결$")
 
 # IRS Zero/Forward curve 만기 순서 (01M~11M, 01Y, 18M(=1.5Y), 02Y~50Y - 시트의 서브헤더 순서 그대로)
 IRS_ZERO_FWD_TENOR_ORDER = [
@@ -163,6 +169,12 @@ def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tup
     if title.startswith("IRS FORWARD CURVE KRWKRW"):
         tenor = _normalize_tenor_en(sub)
         return ("IRS_FWD3M", tenor) if tenor else None
+    m = _FUTURES_RE.match(title)
+    if m:
+        if sub in (None, "일자"):
+            return None
+        field = "내재수익률" if sub == "선물내재수익률" else sub
+        return (f"선물{m.group(1)}년", field)
     if "CD(91일물)" in title:
         return ("CD", "91D")
     if title == "한국:기준금리":
@@ -241,11 +253,12 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
         df_commodity = _parse_sheet(wb[SHEET_COMMODITY], sheet_hint="원자재") \
             if SHEET_COMMODITY in wb.sheetnames else pd.DataFrame()
         df_irs_detail = _parse_sheet(wb[SHEET_IRS_DETAIL]) if SHEET_IRS_DETAIL in wb.sheetnames else pd.DataFrame()
+        df_futures = _parse_sheet(wb[SHEET_FUTURES]) if SHEET_FUTURES in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
     df = pd.concat(
-        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail], ignore_index=True
+        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures], ignore_index=True
     ).drop_duplicates(subset=["날짜", "그룹", "만기"])
     df["날짜"] = pd.to_datetime(df["날짜"])
     _known_tenors = set(TENOR_ORDER) | set(IRS_ZERO_FWD_TENOR_ORDER)
