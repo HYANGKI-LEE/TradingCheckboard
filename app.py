@@ -23,9 +23,11 @@ st.markdown(
     /* st.container(key=...)가 만드는 div 자체는 부모(element-container)와 높이가 같아서
        그대로 sticky를 걸면 containing block에 여유가 없어 전혀 고정되지 않는다.
        :has()로 그 바깥 element-container(페이지 전체 높이를 가진 블록의 자식)를 잡아서 고정시킨다. */
+    /* Streamlit 자체 상단 헤더바(Deploy 버튼 등)가 top:0, z-index:999990으로 항상 떠 있어서
+       내 sticky 컨테이너도 top:0으로 두면 그 헤더바에 위쪽이 가려진다 - 헤더바 높이(3.75rem)만큼 내려서 고정. */
     div:has(> div.st-key-sticky_header) {
         position: sticky;
-        top: 0;
+        top: 3.75rem;
         z-index: 999;
         background-color: var(--background-color, white);
         padding-top: 0.5rem;
@@ -33,7 +35,7 @@ st.markdown(
     }
     div:has(> div[class*="st-key-sticky_subheader_"]) {
         position: sticky;
-        top: 5.6rem;
+        top: 9.35rem;
         z-index: 998;
         background-color: var(--background-color, white);
         padding-bottom: 0.4rem;
@@ -275,7 +277,7 @@ def _format_bp_html(val) -> str:
     return f"{val:.1f}"
 
 
-DEFAULT_CHANGE_COLS = ["1d", "1w", "MTD", "QTD", "YTD"]
+DEFAULT_CHANGE_COLS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
 
 
 def _render_rate_table(sections: list, highlight: set, price_label: str = "현재가(%)",
@@ -362,8 +364,6 @@ MAIN_CREDIT_ROWS = [
     ("회사채 BBB+", "회사채BBB+"),
 ]
 
-
-MAIN_CHANGE_COLS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
 
 # 국고/미국 만기 스프레드 (장기-단기, bp). 라벨은 이 대시보드 전체에서 쓰는 "장기-단기" 표기로 통일
 GOVT_SPREAD_PAIRS = [("3Y", "1Y"), ("5Y", "3Y"), ("10Y", "3Y"), ("30Y", "10Y")]
@@ -471,8 +471,7 @@ def page_main():
         credit_rows = [_rate_change_row(f"{label}(3Y)", f"크레딧_{suffix}", "3Y", scale=1)
                        for label, suffix in MAIN_CREDIT_ROWS]
         sections = [("금리", rate_rows), ("크레딧", credit_rows)]
-        st.markdown(_render_rate_table(sections, highlight=set(), change_label="변동(bp, Tick)",
-                                        change_cols=MAIN_CHANGE_COLS),
+        st.markdown(_render_rate_table(sections, highlight=set(), change_label="변동(bp, Tick)"),
                     unsafe_allow_html=True)
 
         _chart_gap()
@@ -548,7 +547,7 @@ def page_domestic_rate():
 
 # ================================================================ 크레딧
 CREDIT_DETAIL_TENORS = ["6M", "1Y", "1.5Y", "2Y", "2.5Y", "3Y"]
-DELTA_METRIC_OPTIONS = ["1d", "1w", "MTD", "QTD", "YTD"]
+DELTA_METRIC_OPTIONS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
 
 # (표시 등급, Info(크레딧) 시트상 실제 등급 표기) - 은행채/카드채/공사공단채는 시트에 "AA"/"A"로만
 # 있어서(0 표기 없음) 표시할 때만 "AA0"/"A0"로 통일. 여전채 = 시트상 "기타금융채".
@@ -603,6 +602,8 @@ def _rate_change_row_from_hist(hist: pd.DataFrame, scale: float = 100) -> dict |
         "현재가": round(latest_val, 3),
         "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
+        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
         "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
         "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
         "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
@@ -780,17 +781,25 @@ def _excess_return_heatmap():
         return None
 
     text = [[f"{v:.2f}" if v is not None else "" for v in row] for row in z]
+    flat_vals = [v for row in z for v in row if v is not None]
+    zmin, zmax = min(flat_vals), max(flat_vals)
     fig = go.Figure(data=go.Heatmap(
         z=z, x=[f"{t}Y" for t in EXCESS_RETURN_TENORS], y=labels,
-        colorscale="RdBu", zmid=0, text=text, texttemplate="%{text}", textfont={"size": 13},
+        colorscale="RdBu", zmin=zmin, zmax=zmax, text=text, texttemplate="%{text}", textfont={"size": 14},
         colorbar=dict(title="%p"),
     ))
-    for boundary_idx in [0] + section_end_idx:
-        fig.add_shape(type="line", x0=-0.5, x1=len(EXCESS_RETURN_TENORS) - 0.5,
-                      y0=boundary_idx + 0.5, y1=boundary_idx + 0.5, line=dict(color="#333", width=2))
-    fig.update_layout(title="초과 기대수익률 (%p, 국고채 대비, 6개월 수익률) - 국고채 행은 자체 기대수익률(%)",
-                       height=max(460, 30 * len(labels)), xaxis=dict(side="top"),
-                       yaxis=dict(autorange="reversed"), margin=dict(t=80, l=10))
+    # xref="paper"(라벨 영역까지 확장)로 하면 이 임베디드 Plotly 빌드에서 shape가 1개만 그려지는
+    # 버그가 있어, 여러 구분선이 다 보이는 data 좌표 방식으로 유지 (라벨 영역까지는 못 늘림).
+    divider_shapes = [
+        dict(type="line", x0=-0.5, x1=len(EXCESS_RETURN_TENORS) - 0.5,
+             y0=boundary_idx + 0.5, y1=boundary_idx + 0.5, line=dict(color="#333", width=2))
+        for boundary_idx in [0] + section_end_idx
+    ]
+    fig.update_layout(shapes=divider_shapes,
+                       title="초과 기대수익률 (%p, 국고채 대비, 6개월 수익률) - 국고채 행은 자체 기대수익률(%)",
+                       height=max(460, 30 * len(labels)), xaxis=dict(side="top", tickfont=dict(size=13)),
+                       yaxis=dict(autorange="reversed", tickfont=dict(size=13)),
+                       margin=dict(t=80, l=10))
     return fig
 
 
