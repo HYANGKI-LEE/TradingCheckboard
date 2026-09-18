@@ -572,6 +572,112 @@ def _credit_spread_trend_chart(title: str, data_prefix: str, data_suffix: str, s
     return fig
 
 
+# ---- 초과 기대수익률 (참고 파일 "Credit Daily 시황" Main 시트 수식 이식) ----
+# 기대수익률(6개월) = Roll-down에 따른 Capital gain + Coupon
+#   = [만기(t) 채권을 현재 t년물 금리를 표면금리로 가정해 발행 -> 6개월 뒤 (t-0.5)년물로
+#      롤다운되며 그 시점의 (t-0.5)년물 금리로 재평가했을 때의 가격변동분] + (현재 t년물 금리 * 1/2, 6개월치 이자수취분)
+# 초과 기대수익률 = 크레딧 기대수익률 - 국고채 기대수익률 (같은 만기끼리)
+EXCESS_RETURN_TENORS = [1, 1.5, 2, 2.5, 3, 4, 5]  # 연 단위, 참고 파일과 동일한 만기 그리드 (6M은 롤다운 후 잔존만기 0이라 제외)
+GOVT_INTERP_POINTS = [1, 2, 3, 4, 5, 10, 20, 30]  # 국고채 그룹에 실제 존재하는 연 단위 만기
+CREDIT_FINE_TENOR_YEARS = {
+    "3M": 0.25, "6M": 0.5, "9M": 0.75, "1Y": 1, "1.5Y": 1.5, "2Y": 2, "2.5Y": 2.5,
+    "3Y": 3, "4Y": 4, "5Y": 5, "7Y": 7, "10Y": 10,
+}
+
+
+def _excel_pv(rate: float, nper: float, pmt: float, fv: float) -> float:
+    """엑셀 PV 함수와 동일 (type=0, 기말 지급 기준)."""
+    if rate == 0:
+        return -(fv + pmt * nper)
+    return -(fv + pmt * ((1 + rate) ** nper - 1) / rate) / (1 + rate) ** nper
+
+
+def _latest_value(group: str, tenor: str) -> float | None:
+    hist = curve_history(df, group, tenor)
+    if hist.empty:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    return hist.iloc[idx]["값"]
+
+
+def _linear_interp(points: list[tuple[float, float]], x: float) -> float | None:
+    if not points:
+        return None
+    points = sorted(points)
+    if x <= points[0][0]:
+        return points[0][1]
+    if x >= points[-1][0]:
+        return points[-1][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x0 <= x <= x1:
+            w = (x - x0) / (x1 - x0) if x1 != x0 else 0
+            return y0 + (y1 - y0) * w
+    return None
+
+
+def _govt_yield_points() -> list[tuple[float, float]]:
+    """국고채 표준 만기(1~30Y) 최신값 - 보간점으로 한 번만 모아서 재사용."""
+    return [(ty, v) for ty in GOVT_INTERP_POINTS if (v := _latest_value("국고채", f"{ty}Y")) is not None]
+
+
+def _credit_spread_points(credit_group: str) -> list[tuple[float, float]]:
+    """Info(크레딧) 국고대비 스프레드(bp) 보간점 - 등급 하나당 한 번만 모아서 재사용."""
+    return [(ty, v) for label, ty in CREDIT_FINE_TENOR_YEARS.items()
+            if (v := _latest_value(credit_group, label)) is not None]
+
+
+def _expected_return_6m_series(govt_points: list, spread_points: list | None,
+                                tenors: list[float]) -> list[float | None]:
+    """보간점을 매 tenor마다 새로 계산하지 않고 재사용해서 6개월 기대수익률(%) 리스트 산출."""
+    out = []
+    for t in tenors:
+        coupon_govt = _linear_interp(govt_points, t)
+        rolled_govt = _linear_interp(govt_points, t - 0.5)
+        if spread_points is None:
+            coupon, rolled = coupon_govt, rolled_govt
+        else:
+            coupon_spread = _linear_interp(spread_points, t)
+            rolled_spread = _linear_interp(spread_points, t - 0.5)
+            coupon = None if coupon_govt is None or coupon_spread is None else coupon_govt + coupon_spread / 100
+            rolled = None if rolled_govt is None or rolled_spread is None else rolled_govt + rolled_spread / 100
+        if coupon is None or rolled is None:
+            out.append(None)
+            continue
+        price = _excel_pv(rolled / 100 / 4, 4 * (t - 0.5), -coupon / 4, -100)
+        out.append((price - 100) + coupon / 2)
+    return out
+
+
+def _excess_return_heatmap():
+    govt_points = _govt_yield_points()
+    govt_row = _expected_return_6m_series(govt_points, None, EXCESS_RETURN_TENORS)
+    labels, z = [], []
+    for section_label, data_prefix, grades in CREDIT_DETAIL_SECTIONS:
+        for display_grade, data_suffix in grades:
+            group = f"크레딧_{data_prefix}{data_suffix}"
+            spread_points = _credit_spread_points(group)
+            if not spread_points:
+                continue
+            row = _expected_return_6m_series(govt_points, spread_points, EXCESS_RETURN_TENORS)
+            excess = [None if c is None or g is None else round(c - g, 2) for c, g in zip(row, govt_row)]
+            if all(v is None for v in excess):
+                continue
+            labels.append(f"{section_label} {display_grade}")
+            z.append(excess)
+    if not z:
+        return None
+    text = [[f"{v:.2f}" if v is not None else "" for v in row] for row in z]
+    fig = go.Figure(data=go.Heatmap(
+        z=z, x=[f"{t}Y" for t in EXCESS_RETURN_TENORS], y=labels,
+        colorscale="RdYlGn", zmid=0, text=text, texttemplate="%{text}", textfont={"size": 10},
+        colorbar=dict(title="%p"),
+    ))
+    fig.update_layout(title="초과 기대수익률 (%p, 국고채 대비, 6개월 수익률)",
+                       height=max(420, 26 * len(labels)), yaxis=dict(autorange="reversed"),
+                       margin=dict(t=40, l=10))
+    return fig
+
+
 def page_credit_detail():
     with _sticky_header():
         st.title("💳 크레딧")
@@ -612,7 +718,13 @@ def page_credit_detail():
             _chart_gap()
 
     with tab_excess:
-        st.info("추가 예정")
+        st.caption("기대수익률 = Roll-down에 따른 Capital gain + Coupon (보유 6개월 기준). "
+                   "초과 기대수익률 = 크레딧 기대수익률 - 국고채 기대수익률 (같은 만기끼리 비교)")
+        heatmap = _excess_return_heatmap()
+        if heatmap is not None:
+            st.plotly_chart(heatmap, use_container_width=True, key="credit_excess_return_heatmap")
+        else:
+            st.info("계산에 필요한 데이터가 부족합니다.")
 
     with tab_rate:
         st.info("추가 예정")
