@@ -264,15 +264,7 @@ def _pct_change_row(label: str, hist: pd.DataFrame, decimals: int = 2) -> dict |
 
 
 def _format_bp_html(val) -> str:
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return ""
-    if val < 0:
-        return f'<span style="color:#C0392B">({abs(val):.1f})</span>'
-    return f"{val:.1f}"
-
-
-def _format_bp_arrow(val) -> str:
-    """+면 파란 위세모, -면 빨간 아래세모 (국내 시황판 관행)."""
+    """+면 파란 위세모(▲), -면 빨간 아래세모(▼) - 모든 변동표 공통 표기 (국내 시황판 관행)."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return "-"
     if val > 0:
@@ -386,7 +378,7 @@ def page_main():
                        for label, suffix in MAIN_CREDIT_ROWS]
         sections = [("금리", rate_rows), ("크레딧", credit_rows)]
         st.markdown(_render_rate_table(sections, highlight=set(), change_label="변동(bp, Tick)",
-                                        change_cols=MAIN_CHANGE_COLS, formatter=_format_bp_arrow),
+                                        change_cols=MAIN_CHANGE_COLS),
                     unsafe_allow_html=True)
 
         _chart_gap()
@@ -478,14 +470,52 @@ CREDIT_DETAIL_SECTIONS = [
 ]
 
 
-def _render_credit_wide_table(metric: str) -> str:
+def _credit_rate_row(credit_group: str, tenor: str) -> dict | None:
+    """크레딧 절대금리(%) = 국고채 금리 + Info(크레딧) 국고대비 스프레드(bp)/100."""
+    govt = curve_history(df, "국고채", tenor)[["날짜", "값"]].rename(columns={"값": "govt"})
+    spread = curve_history(df, credit_group, tenor)[["날짜", "값"]].rename(columns={"값": "spread"})
+    merged = govt.merge(spread, on="날짜", how="inner").sort_values("날짜").reset_index(drop=True)
+    if merged.empty:
+        return None
+    merged["값"] = merged["govt"] + merged["spread"] / 100
+    return _rate_change_row_from_hist(merged[["날짜", "값"]], scale=100)
+
+
+def _rate_change_row_from_hist(hist: pd.DataFrame, scale: float = 100) -> dict | None:
+    """_rate_change_row와 동일한 변동 계산을 이미 만들어둔 hist(날짜,값)에 대해 수행."""
+    hist = hist.sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        return round((latest_val - prior.iloc[-1]["값"]) * scale, 1) if not prior.empty else None
+
+    return {
+        "현재가": round(latest_val, 3),
+        "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+    }
+
+
+def _render_credit_wide_table(metric: str, row_fn, current_label: str, current_decimals: int,
+                               change_label: str = "변동(bp)") -> str:
     tenors = CREDIT_DETAIL_TENORS
     n = len(tenors)
     html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">유형</th>'
-            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">현재값(bp)</th>'
-            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">전일대비 변동(bp)</th></tr>'
+            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">{current_label}</th>'
+            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">{change_label}</th></tr>'
             '<tr style="border-bottom:1px solid #999;"><th></th>']
     for _ in range(2):
         for t in tenors:
@@ -508,14 +538,14 @@ def _render_credit_wide_table(metric: str) -> str:
                      f'style="background:#EEE;font-weight:bold;padding:4px 6px;">{section_label}</td></tr>')
         for display_grade, data_suffix in grades:
             group = f"크레딧_{data_prefix}{data_suffix}"
-            row_cells = [_rate_change_row(f"{section_label} {display_grade}", group, t, scale=1) for t in tenors]
+            row_cells = [row_fn(group, t) for t in tenors]
             if all(rd is None for rd in row_cells):
                 continue
             html.append(f'<tr style="border-bottom:1px solid #eee;">'
                          f'<td style="padding:3px 6px;">{section_label} {display_grade}</td>')
             for rd in row_cells:
-                html.append(f'<td style="text-align:right;padding:3px 6px;">{rd["현재가"]:.1f}</td>' if rd
-                             else '<td style="text-align:right;padding:3px 6px;">-</td>')
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{rd["현재가"]:.{current_decimals}f}</td>'
+                             if rd else '<td style="text-align:right;padding:3px 6px;">-</td>')
             for rd in row_cells:
                 v = _format_bp_html(rd[metric]) if rd and rd[metric] is not None else "-"
                 html.append(f'<td style="text-align:right;padding:3px 6px;">{v}</td>')
@@ -524,9 +554,30 @@ def _render_credit_wide_table(metric: str) -> str:
     return "".join(html)
 
 
+CREDIT_CHART_COLORS = ["#000000", "#E67E22", "#27AE60", "#2980B9", "#8E44AD", "#C0392B"]
+
+
+def _credit_spread_trend_chart(title: str, data_prefix: str, data_suffix: str, start_date, end_date):
+    group = f"크레딧_{data_prefix}{data_suffix}"
+    fig = go.Figure()
+    for i, t in enumerate(CREDIT_DETAIL_TENORS):
+        hist = curve_history(df, group, t)
+        hist = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+        if hist.empty:
+            continue
+        fig.add_trace(go.Scatter(x=hist["날짜"], y=hist["값"], mode="lines", name=t,
+                                  line=dict(width=1.8, color=CREDIT_CHART_COLORS[i % len(CREDIT_CHART_COLORS)])))
+    fig.update_layout(title=title, height=320, yaxis_title="bp",
+                       legend=dict(orientation="h", y=-0.3), margin=dict(t=40))
+    return fig
+
+
 def page_credit_detail():
     with _sticky_header():
         st.title("💳 크레딧")
+
+    credit_dates = df.loc[df["그룹"].str.startswith("크레딧_", na=False), "날짜"]
+    min_date, max_date = credit_dates.min().date(), credit_dates.max().date()
 
     tab_change, tab_spread, tab_excess, tab_rate = st.tabs(["변동", "스프레드", "초과기대수익률", "금리"])
 
@@ -534,10 +585,31 @@ def page_credit_detail():
         metric = st.segmented_control("변동 기준", DELTA_METRIC_OPTIONS, default="1d",
                                        key="credit_detail_metric") or "1d"
         st.markdown("#### 크레딧 스프레드 : 테너별")
-        st.markdown(_render_credit_wide_table(metric), unsafe_allow_html=True)
+        st.markdown(_render_credit_wide_table(metric, lambda g, t: _rate_change_row("", g, t, scale=1),
+                                               "현재값(bp)", 1, "변동(bp)"), unsafe_allow_html=True)
+
+        _chart_gap()
+        st.markdown("#### 크레딧 금리 : 테너별")
+        st.markdown(_render_credit_wide_table(metric, _credit_rate_row, "현재값(%)", 3, "변동(bp)"),
+                    unsafe_allow_html=True)
 
     with tab_spread:
-        st.info("추가 예정")
+        with _sticky_subheader("credit_spread"):
+            spread_start, spread_end = period_selector(min_date, max_date, key_prefix="credit_spread", default="1Y")
+        for section_label, data_prefix, grades in CREDIT_DETAIL_SECTIONS:
+            available_grades = [(dg, ds) for dg, ds in grades
+                                 if not df.loc[df["그룹"] == f"크레딧_{data_prefix}{ds}"].empty]
+            if not available_grades:
+                continue
+            st.markdown(f"#### {section_label}")
+            cols = st.columns(3)
+            for i, (display_grade, data_suffix) in enumerate(available_grades):
+                fig = _credit_spread_trend_chart(f"{section_label} {display_grade}", data_prefix, data_suffix,
+                                                  spread_start, spread_end)
+                with cols[i % 3]:
+                    st.plotly_chart(fig, use_container_width=True,
+                                     key=f"credit_trend_{data_prefix}{data_suffix}")
+            _chart_gap()
 
     with tab_excess:
         st.info("추가 예정")
