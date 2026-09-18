@@ -11,6 +11,7 @@ from data_loader import (
     FOREIGN_COUNTRIES_ORDER,
     COMMODITY_ORDER,
     IRS_ZERO_FWD_TENOR_ORDER,
+    EXCEL_PATH,
     load_raw_data,
     latest_curve,
     curve_history,
@@ -651,8 +652,14 @@ def _expected_return_6m_series(govt_points: list, spread_points: list | None,
 def _excess_return_heatmap():
     govt_points = _govt_yield_points()
     govt_row = _expected_return_6m_series(govt_points, None, EXCESS_RETURN_TENORS)
-    labels, z = [], []
+
+    # 국고채 자체의 기대수익률(절대, %)을 맨 위 기준행으로 추가 (참고 파일과 동일한 구성)
+    labels = ["국고채"]
+    z = [[None if v is None else round(v, 2) for v in govt_row]]
+    section_end_idx = []  # 권역 구분선을 그릴 행 인덱스(그 권역의 마지막 행)
+
     for section_label, data_prefix, grades in CREDIT_DETAIL_SECTIONS:
+        section_start = len(labels)
         for display_grade, data_suffix in grades:
             group = f"크레딧_{data_prefix}{data_suffix}"
             spread_points = _credit_spread_points(group)
@@ -664,23 +671,89 @@ def _excess_return_heatmap():
                 continue
             labels.append(f"{section_label} {display_grade}")
             z.append(excess)
-    if not z:
+        if len(labels) > section_start:
+            section_end_idx.append(len(labels) - 1)
+
+    if len(z) <= 1:
         return None
+
     text = [[f"{v:.2f}" if v is not None else "" for v in row] for row in z]
     fig = go.Figure(data=go.Heatmap(
         z=z, x=[f"{t}Y" for t in EXCESS_RETURN_TENORS], y=labels,
-        colorscale="RdYlGn", zmid=0, text=text, texttemplate="%{text}", textfont={"size": 10},
+        colorscale="RdBu", zmid=0, text=text, texttemplate="%{text}", textfont={"size": 13},
         colorbar=dict(title="%p"),
     ))
-    fig.update_layout(title="초과 기대수익률 (%p, 국고채 대비, 6개월 수익률)",
-                       height=max(420, 26 * len(labels)), yaxis=dict(autorange="reversed"),
-                       margin=dict(t=40, l=10))
+    for boundary_idx in [0] + section_end_idx:
+        fig.add_shape(type="line", x0=-0.5, x1=len(EXCESS_RETURN_TENORS) - 0.5,
+                      y0=boundary_idx + 0.5, y1=boundary_idx + 0.5, line=dict(color="#333", width=2))
+    fig.update_layout(title="초과 기대수익률 (%p, 국고채 대비, 6개월 수익률) - 국고채 행은 자체 기대수익률(%)",
+                       height=max(460, 30 * len(labels)), xaxis=dict(side="top"),
+                       yaxis=dict(autorange="reversed"), margin=dict(t=80, l=10))
     return fig
+
+
+@st.cache_data(show_spinner="초과 기대수익률 계산 중...")
+def _excess_return_heatmap_cached(_mtime: float):
+    """등급 34개 x 만기 7개 조합을 매번 다시 계산하면 느려서 파일이 안 바뀌는 한 캐싱."""
+    return _excess_return_heatmap()
+
+
+def _govt_wide_pivot() -> pd.DataFrame:
+    """국고채 표준만기(1~30Y)를 날짜별로 피벗 - 히스토리 보간에 재사용."""
+    tenors = [f"{t}Y" for t in GOVT_INTERP_POINTS]
+    sub = df[(df["그룹"] == "국고채") & (df["만기"].astype(str).isin(tenors))]
+    wide = sub.pivot(index="날짜", columns="만기", values="값")
+    wide.columns = [float(str(c).rstrip("Y")) for c in wide.columns]
+    return wide.sort_index()
+
+
+def _credit_wide_pivot(credit_group: str) -> pd.DataFrame:
+    """Info(크레딧) 세밀만기를 날짜별로 피벗 - 히스토리 보간에 재사용."""
+    tenors = list(CREDIT_FINE_TENOR_YEARS.keys())
+    sub = df[(df["그룹"] == credit_group) & (df["만기"].astype(str).isin(tenors))]
+    wide = sub.pivot(index="날짜", columns="만기", values="값")
+    wide.columns = [CREDIT_FINE_TENOR_YEARS[str(c)] for c in wide.columns]
+    return wide.sort_index()
+
+
+def _row_interp(row: pd.Series, x: float) -> float | None:
+    pts = [(t, v) for t, v in row.items() if pd.notna(v)]
+    return _linear_interp(pts, x) if pts else None
+
+
+def _excess_return_series(credit_group: str, tenor_years: float) -> pd.DataFrame:
+    """국고채 대비 초과 기대수익률(%p) 시계열 [날짜, 값]."""
+    govt_wide = _govt_wide_pivot()
+    credit_wide = _credit_wide_pivot(credit_group)
+    combined_index = govt_wide.index.union(credit_wide.index)
+    govt_aligned = govt_wide.reindex(combined_index).ffill()
+    credit_aligned = credit_wide.reindex(combined_index).ffill()
+
+    dates, vals = [], []
+    for date in combined_index:
+        g_row, s_row = govt_aligned.loc[date], credit_aligned.loc[date]
+        g_coupon, g_rolled = _row_interp(g_row, tenor_years), _row_interp(g_row, tenor_years - 0.5)
+        s_coupon, s_rolled = _row_interp(s_row, tenor_years), _row_interp(s_row, tenor_years - 0.5)
+        if None in (g_coupon, g_rolled, s_coupon, s_rolled):
+            continue
+        c_coupon, c_rolled = g_coupon + s_coupon / 100, g_rolled + s_rolled / 100
+        price_c = _excel_pv(c_rolled / 100 / 4, 4 * (tenor_years - 0.5), -c_coupon / 4, -100)
+        price_g = _excel_pv(g_rolled / 100 / 4, 4 * (tenor_years - 0.5), -g_coupon / 4, -100)
+        ret_c = (price_c - 100) + c_coupon / 2
+        ret_g = (price_g - 100) + g_coupon / 2
+        dates.append(date)
+        vals.append(ret_c - ret_g)
+    return pd.DataFrame({"날짜": dates, "값": vals})
+
+
+@st.cache_data(show_spinner="초과 기대수익률 추이 계산 중...")
+def _excess_return_series_cached(credit_group: str, tenor_years: float, _mtime: float) -> pd.DataFrame:
+    return _excess_return_series(credit_group, tenor_years)
 
 
 def page_credit_detail():
     with _sticky_header():
-        st.title("💳 크레딧")
+        st.title("🏢 크레딧")
 
     credit_dates = df.loc[df["그룹"].str.startswith("크레딧_", na=False), "날짜"]
     min_date, max_date = credit_dates.min().date(), credit_dates.max().date()
@@ -720,11 +793,37 @@ def page_credit_detail():
     with tab_excess:
         st.caption("기대수익률 = Roll-down에 따른 Capital gain + Coupon (보유 6개월 기준). "
                    "초과 기대수익률 = 크레딧 기대수익률 - 국고채 기대수익률 (같은 만기끼리 비교)")
-        heatmap = _excess_return_heatmap()
+        heatmap = _excess_return_heatmap_cached(EXCEL_PATH.stat().st_mtime)
         if heatmap is not None:
             st.plotly_chart(heatmap, use_container_width=True, key="credit_excess_return_heatmap")
         else:
             st.info("계산에 필요한 데이터가 부족합니다.")
+
+        _chart_gap()
+        st.markdown("#### 초과 기대수익률 추이")
+        excess_items = [
+            (f"{section_label} {display_grade}", f"크레딧_{data_prefix}{data_suffix}")
+            for section_label, data_prefix, grades in CREDIT_DETAIL_SECTIONS
+            for display_grade, data_suffix in grades
+        ]
+        col_a, col_b = st.columns(2)
+        with col_a:
+            item_label = st.selectbox("크레딧 종류", [label for label, _ in excess_items], key="excess_series_item")
+        with col_b:
+            tenor_label = st.selectbox("테너", [f"{t}Y" for t in EXCESS_RETURN_TENORS], index=4,
+                                        key="excess_series_tenor")
+        selected_group = dict(excess_items)[item_label]
+        selected_tenor = float(tenor_label.rstrip("Y"))
+
+        series_start, series_end = period_selector(min_date, max_date, key_prefix="excess_series", default="1Y")
+        series = _excess_return_series_cached(selected_group, selected_tenor, EXCEL_PATH.stat().st_mtime)
+        series = series[(series["날짜"].dt.date >= series_start) & (series["날짜"].dt.date <= series_end)]
+        if series.empty:
+            st.info("선택한 조합의 데이터가 없습니다.")
+        else:
+            view = series.assign(**_with_ma(series["값"]))
+            _plot_with_ma(view, f"{item_label} {tenor_label} 초과기대수익률 추이", "%p",
+                          f"{item_label} {tenor_label}", key="excess_series_chart")
 
     with tab_rate:
         st.info("추가 예정")
@@ -1791,7 +1890,7 @@ def page_relative_value():
 nav = st.navigation([
     st.Page(page_main, title="Main", icon="✨", default=True),
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️"),
-    st.Page(page_credit_detail, title="크레딧", icon="💳"),
+    st.Page(page_credit_detail, title="크레딧", icon="🏢"),
     st.Page(page_irs_detail, title="IRS", icon="🔁"),
     st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
