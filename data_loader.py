@@ -45,6 +45,7 @@ SHEET_COMMODITY = "Info(원자재)"
 SHEET_IRS_DETAIL = "Info(IRS)"
 SHEET_FUTURES = "Info(선물)"
 SHEET_STOCK = "Info(주가)"
+SHEET_CREDIT_DETAIL = "Info(크레딧)"
 
 # 국채선물 연결(3/5/10/30년): 그룹은 "선물{N}년", "만기" 자리에는 필드명(현재가/이론가/저평가/수정듀레이션/내재수익률)이 들어간다
 FUTURES_TENORS = ["3", "5", "10", "30"]
@@ -123,6 +124,20 @@ def _normalize_tenor(label: str) -> str | None:
     return None
 
 
+def _normalize_credit_detail_tenor(label: str) -> str | None:
+    """Info(크레딧) 서브헤더: '{N}(.5)?월이하(국고대비)' / '{N}(.5)?년이하(국고대비)'."""
+    label = (label or "").strip().replace("(국고대비)", "")
+    m = re.match(r"^(\d+(?:\.\d+)?)월이하$", label)
+    if m:
+        n = float(m.group(1))
+        return f"{int(n) if n.is_integer() else n}M"
+    m = re.match(r"^(\d+(?:\.\d+)?)년이하$", label)
+    if m:
+        n = float(m.group(1))
+        return f"{int(n) if n.is_integer() else n}Y"
+    return None
+
+
 def _normalize_tenor_en(label: str) -> str | None:
     """IRS Zero/Forward curve 서브헤더 형식: '01M'~'11M', '01Y'~'50Y' (18M=1.5Y 특례)."""
     label = (label or "").strip().upper()
@@ -152,6 +167,15 @@ def _find_blocks(row2: tuple) -> list[tuple[int, int, str]]:
 
 def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tuple[str, str] | None:
     title = (title or "").strip()
+    if sheet_hint == "크레딧상세":
+        # Info(크레딧): 국고대비 스프레드(bp)를 훨씬 잘게 쪼갠 만기로 제공하는 별도 시트.
+        # Info(국내금리)의 신용스프레드 그룹(예: "은행채AAA")과 이름이 겹치면 값 단위(bp vs %)가
+        # 섞여버리므로 "크레딧_" 접두사로 완전히 분리된 그룹명을 쓴다.
+        name = title[len(_CURVE_PREFIX):] if title.startswith(_CURVE_PREFIX) else title
+        name = name.replace("(공모/무보증)", "").replace("(정부보증)", "정부보증").replace("금융채 ", "")
+        name = re.sub(r"\s+", "", name)
+        tenor = _normalize_credit_detail_tenor(sub)
+        return (f"크레딧_{name}", tenor) if (name and tenor) else None
     if sheet_hint == "원자재":
         name = _clean_commodity_name(title)
         return (name, None) if name else None
@@ -260,11 +284,13 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
         df_irs_detail = _parse_sheet(wb[SHEET_IRS_DETAIL]) if SHEET_IRS_DETAIL in wb.sheetnames else pd.DataFrame()
         df_futures = _parse_sheet(wb[SHEET_FUTURES]) if SHEET_FUTURES in wb.sheetnames else pd.DataFrame()
         df_stock = _parse_sheet(wb[SHEET_STOCK], sheet_hint="주가") if SHEET_STOCK in wb.sheetnames else pd.DataFrame()
+        df_credit_detail = _parse_sheet(wb[SHEET_CREDIT_DETAIL], sheet_hint="크레딧상세") \
+            if SHEET_CREDIT_DETAIL in wb.sheetnames else pd.DataFrame()
     finally:
         wb.close()
 
     df = pd.concat(
-        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures, df_stock],
+        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures, df_stock, df_credit_detail],
         ignore_index=True,
     ).drop_duplicates(subset=["날짜", "그룹", "만기"])
     # 인도네시아 2Y는 최근 값이 여러 영업일째 그대로 고정된 상태(비정상 캐리포워드)로 보여 제외

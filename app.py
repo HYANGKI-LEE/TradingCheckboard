@@ -198,9 +198,10 @@ def _plot_change_multi(series_list: list[tuple[str, str, str]], start_date, end_
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
-def _rate_change_row(label: str, group: str, tenor: str | None = None) -> dict | None:
+def _rate_change_row(label: str, group: str, tenor: str | None = None, scale: float = 100) -> dict | None:
     """항목 한 줄: 현재가 + 1d/1w/MTD/QTD/YTD 변동(bp). 당일 미갱신(캐리포워드)은 건너뛰고
-    실제 값이 바뀐 가장 최근 시점을 기준으로 계산 (해외금리 변동표와 동일한 로직)."""
+    실제 값이 바뀐 가장 최근 시점을 기준으로 계산 (해외금리 변동표와 동일한 로직).
+    scale: 원본 값 단위 -> bp 환산 배수. %로 저장된 금리는 100(기본값), 이미 bp인 값(크레딧 스프레드 등)은 1."""
     if tenor is not None:
         hist = curve_history(df, group, tenor)[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
     else:
@@ -216,12 +217,43 @@ def _rate_change_row(label: str, group: str, tenor: str | None = None) -> dict |
 
     def chg(ref_date):
         prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
-        return round((latest_val - prior.iloc[-1]["값"]) * 100, 1) if not prior.empty else None
+        return round((latest_val - prior.iloc[-1]["값"]) * scale, 1) if not prior.empty else None
 
     return {
         "항목": label,
         "현재가": round(latest_val, 3),
-        "1d": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
+        "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+    }
+
+
+def _pct_change_row(label: str, hist: pd.DataFrame, decimals: int = 2) -> dict | None:
+    """FX/원자재처럼 만기 개념이 없는 가격 계열의 변동표 행. bp 대신 %로 표시.
+    hist: [날짜,값] (derived series - FX 크로스, 금은Ratio 등 - 도 그대로 넘기면 됨)."""
+    hist = hist[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        if prior.empty:
+            return None
+        base = prior.iloc[-1]["값"]
+        return round((latest_val - base) / base * 100, 2) if base else None
+
+    return {
+        "항목": label,
+        "현재가": round(latest_val, decimals),
+        "1d": round((latest_val - prev_val) / prev_val * 100, 2) if prev_val else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
         "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
         "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
@@ -237,13 +269,14 @@ def _format_bp_html(val) -> str:
     return f"{val:.1f}"
 
 
-def _render_rate_table(sections: list, highlight: set) -> str:
+def _render_rate_table(sections: list, highlight: set, price_label: str = "현재가(%)",
+                        price_decimals: int = 3, change_label: str = "변동(bp)") -> str:
     """sections: [(섹션제목, [row_dict,...]), ...]. row_dict 는 _rate_change_row 반환값."""
     html = ['<table style="width:100%;border-collapse:collapse;font-size:13px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
-            '<th style="text-align:right;padding:4px 6px;">현재가(%)</th>'
-            '<th colspan="5" style="text-align:center;padding:4px 6px;">변동(bp)</th></tr>'
+            f'<th style="text-align:right;padding:4px 6px;">{price_label}</th>'
+            f'<th colspan="5" style="text-align:center;padding:4px 6px;">{change_label}</th></tr>'
             '<tr style="border-bottom:1px solid #999;">'
             '<th></th><th></th>'
             '<th style="text-align:right;padding:2px 6px;">1d</th>'
@@ -259,7 +292,7 @@ def _render_rate_table(sections: list, highlight: set) -> str:
             bg = "background:#FDEBD0;" if row["항목"] in highlight else ""
             html.append(f'<tr style="{bg}border-bottom:1px solid #eee;">')
             html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
-            html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.3f}</td>')
+            html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.{price_decimals}f}</td>')
             for col in ["1d", "1w", "MTD", "QTD", "YTD"]:
                 html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
             html.append("</tr>")
@@ -297,6 +330,43 @@ IRS_TABLE_TENORS = [
     "6M", "9M", "1Y", "1.5Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "8Y",
     "9Y", "10Y", "11Y", "12Y", "15Y", "20Y", "25Y", "30Y",
 ]
+
+
+# ================================================================ Main
+MAIN_RATE_ROWS = [
+    ("통안2년", "통안채", "2Y"), ("국고3년", "국고채", "3Y"), ("국고5년", "국고채", "5Y"),
+    ("국고10년", "국고채", "10Y"), ("국고30년", "국고채", "30Y"),
+    ("미국2년", "미국", "2Y"), ("미국5년", "미국", "5Y"), ("미국10년", "미국", "10Y"),
+    ("CD(3M)", "CD", "91D"), ("A1CP(3M)", "ABCP A1 3개월", None),
+    ("IRS(6M)", "IRS", "6M"), ("IRS(9M)", "IRS", "9M"), ("IRS(1Y)", "IRS", "1Y"),
+    ("IRS(1.5Y)", "IRS", "1.5Y"), ("IRS(2Y)", "IRS", "2Y"),
+    ("3선", "선물3년", "내재수익률"), ("10선", "선물10년", "내재수익률"),
+]
+
+# 크레딧 3Y 스프레드 (Info(크레딧) 시트, bp 원값이라 scale=1). 여전채=기타금융채 (AA0/BBB+ 등급은 시트에 없어 제외)
+MAIN_CREDIT_ROWS = [
+    ("여전채 AA+", "기타금융채AA+"), ("여전채 AA-", "기타금융채AA-"), ("여전채 A+", "기타금융채A+"),
+    ("여전채 A0", "기타금융채A0"), ("여전채 A-", "기타금융채A-"),
+    ("회사채 AA+", "회사채AA+"), ("회사채 AA0", "회사채AA0"), ("회사채 AA-", "회사채AA-"),
+    ("회사채 A+", "회사채A+"), ("회사채 A0", "회사채A0"), ("회사채 A-", "회사채A-"),
+    ("회사채 BBB+", "회사채BBB+"),
+]
+
+
+def page_main():
+    with _sticky_header():
+        st.title("✨ Main")
+
+    st.markdown("#### 주요 금리 : 변동")
+    rate_rows = [_rate_change_row(label, group, tenor) for label, group, tenor in MAIN_RATE_ROWS]
+    credit_rows = [_rate_change_row(f"{label}(3Y)", f"크레딧_{suffix}", "3Y", scale=1)
+                   for label, suffix in MAIN_CREDIT_ROWS]
+    sections = [("금리", rate_rows), ("크레딧", credit_rows)]
+    st.markdown(_render_rate_table(sections, highlight=set()), unsafe_allow_html=True)
+
+    _chart_gap()
+    st.markdown("#### 주요 스프레드 : 변동")
+    st.info("이 표는 준비 중입니다 - 필요한 히스토리(장기평균 등)를 확인해서 데이터를 채워주시면 반영할게요.")
 
 
 # ================================================================ 국내금리
@@ -362,6 +432,95 @@ def page_domestic_rate():
             _chart_gap()
 
 
+# ================================================================ 크레딧
+CREDIT_DETAIL_TENORS = ["6M", "1Y", "1.5Y", "2Y", "2.5Y", "3Y"]
+DELTA_METRIC_OPTIONS = ["1d", "1w", "MTD", "QTD", "YTD"]
+
+# (표시 등급, Info(크레딧) 시트상 실제 등급 표기) - 은행채/카드채/공사공단채는 시트에 "AA"/"A"로만
+# 있어서(0 표기 없음) 표시할 때만 "AA0"/"A0"로 통일. 여전채 = 시트상 "기타금융채".
+CREDIT_DETAIL_SECTIONS = [
+    ("공사/공단채", "공사/공단채",
+     [("정부보증", "정부보증"), ("AAA", "AAA"), ("AA+", "AA+"), ("AA0", "AA"), ("AA-", "AA-")]),
+    ("은행채", "은행채",
+     [("AAA", "AAA"), ("AA+", "AA+"), ("AA0", "AA"), ("AA-", "AA-"), ("A+", "A+"), ("A0", "A"), ("A-", "A-")]),
+    ("카드채", "카드채",
+     [("AAA", "AAA"), ("AA+", "AA+"), ("AA0", "AA"), ("AA-", "AA-"), ("A+", "A+"), ("A0", "A"), ("A-", "A-")]),
+    ("여전채", "기타금융채",
+     [("AAA", "AAA"), ("AA+", "AA+"), ("AA-", "AA-"), ("A+", "A+"), ("A0", "A0"), ("A-", "A-")]),
+    ("회사채", "회사채",
+     [("AAA", "AAA"), ("AA+", "AA+"), ("AA0", "AA0"), ("AA-", "AA-"), ("A+", "A+"), ("A0", "A0"), ("A-", "A-"),
+      ("BBB+", "BBB+"), ("BBB0", "BBB0"), ("BBB-", "BBB-"), ("BB+", "BB+"), ("BB0", "BB0"), ("BB-", "BB-"), ("B", "B")]),
+]
+
+
+def _render_credit_wide_table(metric: str) -> str:
+    tenors = CREDIT_DETAIL_TENORS
+    n = len(tenors)
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">유형</th>'
+            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">현재값(bp)</th>'
+            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">전일대비 변동(bp)</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th>']
+    for _ in range(2):
+        for t in tenors:
+            html.append(f'<th style="text-align:right;padding:2px 6px;">{t}</th>')
+    html.append("</tr>")
+
+    govt_cells = [_rate_change_row("국고채", "국고채", t) for t in tenors]
+    html.append('<tr style="border-bottom:1px solid #eee;background:#F7F7F7;">'
+                 '<td style="padding:3px 6px;font-weight:bold;">국고채(%)</td>')
+    for rd in govt_cells:
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{rd["현재가"]:.3f}</td>' if rd
+                     else '<td style="text-align:right;padding:3px 6px;">-</td>')
+    for rd in govt_cells:
+        v = _format_bp_html(rd[metric]) if rd and rd[metric] is not None else "-"
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{v}</td>')
+    html.append("</tr>")
+
+    for section_label, data_prefix, grades in CREDIT_DETAIL_SECTIONS:
+        html.append(f'<tr><td colspan="{1 + 2 * n}" '
+                     f'style="background:#EEE;font-weight:bold;padding:4px 6px;">{section_label}</td></tr>')
+        for display_grade, data_suffix in grades:
+            group = f"크레딧_{data_prefix}{data_suffix}"
+            row_cells = [_rate_change_row(f"{section_label} {display_grade}", group, t, scale=1) for t in tenors]
+            if all(rd is None for rd in row_cells):
+                continue
+            html.append(f'<tr style="border-bottom:1px solid #eee;">'
+                         f'<td style="padding:3px 6px;">{section_label} {display_grade}</td>')
+            for rd in row_cells:
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{rd["현재가"]:.1f}</td>' if rd
+                             else '<td style="text-align:right;padding:3px 6px;">-</td>')
+            for rd in row_cells:
+                v = _format_bp_html(rd[metric]) if rd and rd[metric] is not None else "-"
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{v}</td>')
+            html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
+def page_credit_detail():
+    with _sticky_header():
+        st.title("💳 크레딧")
+
+    tab_change, tab_spread, tab_excess, tab_rate = st.tabs(["변동", "스프레드", "초과기대수익률", "금리"])
+
+    with tab_change:
+        metric = st.segmented_control("변동 기준", DELTA_METRIC_OPTIONS, default="1d",
+                                       key="credit_detail_metric") or "1d"
+        st.markdown("#### 크레딧 스프레드 : 테너별")
+        st.markdown(_render_credit_wide_table(metric), unsafe_allow_html=True)
+
+    with tab_spread:
+        st.info("추가 예정")
+
+    with tab_excess:
+        st.info("추가 예정")
+
+    with tab_rate:
+        st.info("추가 예정")
+
+
 IRS_SPREAD_PAIRS = [
     ("9M", "6M"), ("1Y", "6M"), ("1.5Y", "6M"), ("2Y", "6M"),
     ("1Y", "9M"), ("1.5Y", "9M"), ("2Y", "9M"),
@@ -398,6 +557,193 @@ def _irs_butterfly_view(short_t: str, mid_t: str, long_t: str, start_date, end_d
     return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
 
+def _irs_ktb_stats(tenor: str) -> dict | None:
+    """IRS-KTB bp 스프레드의 현재가/변동 + 장기평균 + 최근 3년 Min/Max."""
+    hist = credit_spread(df, "IRS", "국고채")
+    hist = hist[hist["만기"] == tenor][["날짜", "스프레드_bp"]].rename(columns={"스프레드_bp": "값"})
+    hist = hist.sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        return round(latest_val - prior.iloc[-1]["값"], 1) if not prior.empty else None
+
+    recent_3y = hist_upto[hist_upto["날짜"].dt.date >= latest_date - pd.Timedelta(days=365 * 3)]
+    return {
+        "항목": tenor,
+        "현재가": round(latest_val, 1),
+        "1d": round(latest_val - prev_val, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "월초": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "분기초": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "연초": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "장기평균": round(hist_upto["값"].mean(), 1),
+        "3Y_Min": round(recent_3y["값"].min(), 1) if not recent_3y.empty else None,
+        "3Y_Max": round(recent_3y["값"].max(), 1) if not recent_3y.empty else None,
+    }
+
+
+def _render_irs_ktb_table(rows: list) -> str:
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">항목</th>'
+            '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
+            '<th colspan="5" style="text-align:center;padding:4px 6px;">변동(bp)</th>'
+            '<th style="text-align:center;padding:4px 6px;">장기평균</th>'
+            '<th colspan="2" style="text-align:center;padding:4px 6px;">최근 3년</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th><th></th>'
+            '<th style="text-align:right;padding:2px 6px;">1d</th>'
+            '<th style="text-align:right;padding:2px 6px;">1w</th>'
+            '<th style="text-align:right;padding:2px 6px;">월초</th>'
+            '<th style="text-align:right;padding:2px 6px;">분기초</th>'
+            '<th style="text-align:right;padding:2px 6px;">연초</th>'
+            '<th></th>'
+            '<th style="text-align:right;padding:2px 6px;">Min</th>'
+            '<th style="text-align:right;padding:2px 6px;">Max</th></tr>']
+    for row in rows:
+        if row is None:
+            continue
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.1f}</td>')
+        for col in ["1d", "1w", "월초", "분기초", "연초"]:
+            html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{row["장기평균"]:.1f}</td>')
+        mn = f'{row["3Y_Min"]:.1f}' if row["3Y_Min"] is not None else "-"
+        mx = f'{row["3Y_Max"]:.1f}' if row["3Y_Max"] is not None else "-"
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{mn}</td>')
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{mx}</td>')
+        html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
+def _irs_spread_matrix_row(long_t: str, short_t: str) -> dict | None:
+    """주요 IRS 스프레드: 현재가(bp) + 최근 6개월 표준화(z-score) + 1d/1w/MTD/QTD 변동."""
+    full = _tenor_spread_view("IRS", long_t, short_t, df["날짜"].min().date(), df["날짜"].max().date())
+    hist = full[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        return round(latest_val - prior.iloc[-1]["값"], 1) if not prior.empty else None
+
+    six_m = hist_upto[hist_upto["날짜"].dt.date >= latest_date - pd.Timedelta(days=182)]
+    std = six_m["값"].std()
+    zscore = round((latest_val - six_m["값"].mean()) / std, 1) if std and std > 0 else None
+
+    return {
+        "항목": f"{short_t} * {long_t}",
+        "현재가": round(latest_val, 1),
+        "표준화": zscore,
+        "1d": round(latest_val - prev_val, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+    }
+
+
+def _render_irs_spread_matrix(rows: list) -> str:
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">항목</th>'
+            '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
+            '<th style="text-align:right;padding:4px 6px;">6M 표준화</th>'
+            '<th colspan="4" style="text-align:center;padding:4px 6px;">변동(bp)</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th><th></th><th></th>'
+            '<th style="text-align:right;padding:2px 6px;">1d</th>'
+            '<th style="text-align:right;padding:2px 6px;">1w</th>'
+            '<th style="text-align:right;padding:2px 6px;">MTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">QTD</th></tr>']
+    for row in rows:
+        if row is None:
+            continue
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.1f}</td>')
+        z = f'{row["표준화"]:.1f}' if row["표준화"] is not None else "-"
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{z}</td>')
+        for col in ["1d", "1w", "MTD", "QTD"]:
+            html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+        html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
+def _irs_forward_row(tenor: str) -> dict | None:
+    """주요 IRS Forward Rate: 현재가(%) + 기준금리 대비 금리인상 반영횟수(0.25%p 단위 근사) + 변동.
+    반영횟수 = (선도금리 - 기준금리) / 0.25 - 정확한 헤지비율 계산이 아닌 대략적인 참고값."""
+    hist = curve_history(df, "IRS_FWD3M", tenor)[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    if len(hist) < 2:
+        return None
+    idx = _effective_latest_idx(hist["값"].tolist())
+    latest_date = hist.loc[idx, "날짜"].date()
+    latest_val = hist.loc[idx, "값"]
+    prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
+    min_d = hist["날짜"].min().date()
+    hist_upto = hist.loc[:idx]
+
+    def chg(ref_date):
+        prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
+        return round((latest_val - prior.iloc[-1]["값"]) * 100, 1) if not prior.empty else None
+
+    base_hist = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
+    base_asof = base_hist[base_hist["날짜"].dt.date <= latest_date]
+    base_rate = base_asof.iloc[-1]["값"] if not base_asof.empty else None
+    hikes = round((latest_val - base_rate) / 0.25, 1) if base_rate is not None else None
+
+    return {
+        "항목": tenor,
+        "현재가": round(latest_val, 3),
+        "반영횟수": hikes,
+        "1d": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
+        "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
+        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+    }
+
+
+def _render_irs_forward_table(rows: list) -> str:
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">항목</th>'
+            '<th style="text-align:right;padding:4px 6px;">현재가(%)</th>'
+            '<th style="text-align:right;padding:4px 6px;">금리인상 반영횟수</th>'
+            '<th colspan="4" style="text-align:center;padding:4px 6px;">변동(bp)</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th><th></th><th></th>'
+            '<th style="text-align:right;padding:2px 6px;">1d</th>'
+            '<th style="text-align:right;padding:2px 6px;">1w</th>'
+            '<th style="text-align:right;padding:2px 6px;">MTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">QTD</th></tr>']
+    for row in rows:
+        if row is None:
+            continue
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.3f}</td>')
+        hk = f'{row["반영횟수"]:.1f}' if row["반영횟수"] is not None else "-"
+        html.append(f'<td style="text-align:right;padding:3px 6px;">{hk}</td>')
+        for col in ["1d", "1w", "MTD", "QTD"]:
+            html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+        html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
 # ================================================================ IRS (Par/스프레드/Zero/Fwd/버터플라이)
 def page_irs_detail():
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
@@ -407,9 +753,33 @@ def page_irs_detail():
         start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
     available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
-    tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
-        ["Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"]
+    tab_change, tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
+        ["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"]
     )
+
+    with tab_change:
+        st.markdown("#### IRS(%)")
+        sections = [("IRS(%)", [_rate_change_row(t, "IRS", t) for t in IRS_TABLE_TENORS])]
+        st.markdown(_render_rate_table(sections, highlight={"1Y", "2Y", "3Y"}), unsafe_allow_html=True)
+
+        _chart_gap()
+        st.markdown("#### IRS-KTB")
+        ktb_rows = [_irs_ktb_stats(t) for t in IRS_TABLE_TENORS]
+        st.markdown(_render_irs_ktb_table(ktb_rows), unsafe_allow_html=True)
+
+        _chart_gap()
+        st.markdown("#### 주요 IRS 스프레드")
+        matrix_rows = [_irs_spread_matrix_row(long_t, short_t) for long_t, short_t in IRS_SPREAD_PAIRS
+                        if long_t in available_tenors and short_t in available_tenors]
+        st.markdown(_render_irs_spread_matrix(matrix_rows), unsafe_allow_html=True)
+
+        _chart_gap()
+        st.markdown("#### 주요 IRS Forward Rate")
+        st.caption("금리인상 반영횟수 = (선도금리 - 기준금리) / 0.25%p, 참고용 근사치입니다.")
+        fwd_avail = set(df.loc[df["그룹"] == "IRS_FWD3M", "만기"].dropna().astype(str).unique())
+        fwd_tenors = [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in fwd_avail]
+        fwd_rows = [_irs_forward_row(t) for t in fwd_tenors]
+        st.markdown(_render_irs_forward_table(fwd_rows), unsafe_allow_html=True)
 
     for tab, label, group in [(tab_par, "Par rate", "IRS"), (tab_zero, "Zero rate", "IRS_ZERO"),
                                (tab_fwd, "Fwd rate", "IRS_FWD3M")]:
@@ -659,6 +1029,13 @@ def _fx_cross_krw_view(ccy_group: str, start_date, end_date) -> pd.DataFrame:
     return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
 
+def _fx_change_row(group: str, is_cross: bool, min_date, max_date) -> dict | None:
+    hist = _fx_cross_krw_view(group, min_date, max_date) if is_cross else \
+        df[df["그룹"] == group][["날짜", "값"]]
+    flag = FX_FLAGS.get(group, "")
+    return _pct_change_row(f"{flag} {group}", hist, decimals=3)
+
+
 # ================================================================ FX
 def page_fx():
     fx_groups = [g for g, is_cross in FX_ORDER if not is_cross]
@@ -668,14 +1045,23 @@ def page_fx():
         st.title("💱 FX")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="1Y")
 
-    cols = st.columns(3)
-    for i, (group, is_cross) in enumerate(FX_ORDER):
-        view = _fx_cross_krw_view(group, start_date, end_date) if is_cross else _series_history_view(group, start_date, end_date)
-        flag = FX_FLAGS.get(group, "")
-        with cols[i % 3]:
-            _plot_with_ma(view, f"{flag} {group}", "환율", f"{flag} {group}", key=f"fx_{group}")
-        if (i + 1) % 3 == 0:
-            _chart_gap()
+    tab_change, tab_chart = st.tabs(["변동", "차트"])
+
+    with tab_change:
+        rows = [_fx_change_row(g, is_cross, min_date, max_date) for g, is_cross in FX_ORDER]
+        sections = [("FX", rows)]
+        st.markdown(_render_rate_table(sections, highlight=set(), price_label="현재가",
+                                        price_decimals=3, change_label="변동(%)"), unsafe_allow_html=True)
+
+    with tab_chart:
+        cols = st.columns(3)
+        for i, (group, is_cross) in enumerate(FX_ORDER):
+            view = _fx_cross_krw_view(group, start_date, end_date) if is_cross else _series_history_view(group, start_date, end_date)
+            flag = FX_FLAGS.get(group, "")
+            with cols[i % 3]:
+                _plot_with_ma(view, f"{flag} {group}", "환율", f"{flag} {group}", key=f"fx_{group}")
+            if (i + 1) % 3 == 0:
+                _chart_gap()
 
 
 COMMODITY_EMOJI = {
@@ -711,6 +1097,13 @@ def _commodity_ratio_view(a_group: str, b_group: str, start_date, end_date) -> p
     return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
 
+def _commodity_change_row(group: str, min_date, max_date) -> dict | None:
+    hist = _commodity_ratio_view("금", "은", min_date, max_date) if group == "금은Ratio" else \
+        df[df["그룹"] == group][["날짜", "값"]]
+    emoji = COMMODITY_EMOJI.get(group, "")
+    return _pct_change_row(f"{emoji} {group}", hist, decimals=2)
+
+
 def page_commodity():
     commodity_dates = df.loc[df["그룹"].isin(COMMODITY_ORDER), "날짜"]
     min_date, max_date = commodity_dates.min().date(), commodity_dates.max().date()
@@ -718,23 +1111,37 @@ def page_commodity():
         st.title("🛢️ 원자재")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
 
-    for category, groups in COMMODITY_CATEGORIES.items():
-        available = [g for g in groups if g == "금은Ratio" or not df.loc[df["그룹"] == g].empty]
-        if not available:
-            continue
-        st.subheader(category)
-        cols = st.columns(3)
-        for i, group in enumerate(available):
-            emoji = COMMODITY_EMOJI.get(group, "")
-            if group == "금은Ratio":
-                view = _commodity_ratio_view("금", "은", start_date, end_date)
-                yaxis_title = "Ratio"
-            else:
-                view = _series_history_view(group, start_date, end_date)
-                yaxis_title = "가격"
-            with cols[i % 3]:
-                _plot_with_ma(view, f"{emoji} {group}", yaxis_title, f"{emoji} {group}", key=f"commodity_{group}")
-        _chart_gap()
+    tab_change, tab_chart = st.tabs(["변동", "차트"])
+
+    with tab_change:
+        sections = []
+        for category, groups in COMMODITY_CATEGORIES.items():
+            available = [g for g in groups if g == "금은Ratio" or not df.loc[df["그룹"] == g].empty]
+            if not available:
+                continue
+            rows = [_commodity_change_row(g, min_date, max_date) for g in available]
+            sections.append((category, rows))
+        st.markdown(_render_rate_table(sections, highlight=set(), price_label="현재가",
+                                        price_decimals=2, change_label="변동(%)"), unsafe_allow_html=True)
+
+    with tab_chart:
+        for category, groups in COMMODITY_CATEGORIES.items():
+            available = [g for g in groups if g == "금은Ratio" or not df.loc[df["그룹"] == g].empty]
+            if not available:
+                continue
+            st.subheader(category)
+            cols = st.columns(3)
+            for i, group in enumerate(available):
+                emoji = COMMODITY_EMOJI.get(group, "")
+                if group == "금은Ratio":
+                    view = _commodity_ratio_view("금", "은", start_date, end_date)
+                    yaxis_title = "Ratio"
+                else:
+                    view = _series_history_view(group, start_date, end_date)
+                    yaxis_title = "가격"
+                with cols[i % 3]:
+                    _plot_with_ma(view, f"{emoji} {group}", yaxis_title, f"{emoji} {group}", key=f"commodity_{group}")
+            _chart_gap()
 
 
 STOCK_INDEX_ORDER = [
@@ -788,12 +1195,16 @@ def page_stock():
             fig2.add_trace(go.Scatter(x=data["날짜"], y=data["갭"], name="Yield Gap",
                                        line=dict(color="black", width=2)))
             fig2.add_hline(y=3, line_color="blue", line_dash="dash",
-                            annotation_text="적극매도", annotation_position="right")
+                            annotation_text="적극매도", annotation_position="right",
+                            annotation_font_color="blue", annotation_font_size=11)
             fig2.add_hline(y=6, line_color="#D4AC0D", line_dash="dash",
-                            annotation_text="매수", annotation_position="right")
+                            annotation_text="매수", annotation_position="right",
+                            annotation_font_color="#D4AC0D", annotation_font_size=11)
             fig2.add_hline(y=8, line_color="red", line_dash="dash",
-                            annotation_text="적극매수", annotation_position="right")
-            fig2.update_layout(title="Yield Gap (1/PER - 국고채 3년)", yaxis_title="%p", height=420, margin=dict(t=40))
+                            annotation_text="적극매수", annotation_position="right",
+                            annotation_font_color="red", annotation_font_size=11)
+            fig2.update_layout(title="Yield Gap (1/PER - 국고채 3년)", yaxis_title="%p", height=420,
+                                margin=dict(t=40, r=70))
             st.plotly_chart(fig2, use_container_width=True, key="stock_yieldgap")
 
 
@@ -1169,7 +1580,9 @@ def page_relative_value():
 
 # ================================================================ 세로 사이드바 내비게이션
 nav = st.navigation([
-    st.Page(page_domestic_rate, title="국내금리", icon="🏛️", default=True),
+    st.Page(page_main, title="Main", icon="✨", default=True),
+    st.Page(page_domestic_rate, title="국내금리", icon="🏛️"),
+    st.Page(page_credit_detail, title="크레딧", icon="💳"),
     st.Page(page_irs_detail, title="IRS", icon="🔁"),
     st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
