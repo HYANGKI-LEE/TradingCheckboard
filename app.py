@@ -431,6 +431,8 @@ def _render_spread_matrix_table(sections: list) -> str:
 
 @st.cache_data(show_spinner="주요 스프레드 계산 중...")
 def _main_spread_sections_cached(_mtime: float) -> list:
+    short_rows = [_spread_matrix_row("CD(3M)-기준금리", _vs_base_rate_hist("CD", "91D")),
+                  _spread_matrix_row("A1CP(3M)-기준금리", _vs_base_rate_hist("ABCP A1", "3M"))]
     govt_rows = [_spread_matrix_row(f"국고 {lg}-{sh}", _tenor_spread_view("국고채", lg, sh, df["날짜"].min().date(),
                                                                         df["날짜"].max().date()))
                  for lg, sh in GOVT_SPREAD_PAIRS]
@@ -445,7 +447,7 @@ def _main_spread_sections_cached(_mtime: float) -> list:
     credit_rows = [_spread_matrix_row(f"{label}(3Y)", curve_history(df, f"크레딧_{suffix}", "3Y")[["날짜", "값"]])
                    for label, suffix in MAIN_CREDIT_ROWS]
     return [
-        ("국고", govt_rows), ("미국", us_rows), ("나비형(50:50)", fly_rows),
+        ("단기", short_rows), ("국고", govt_rows), ("미국", us_rows), ("나비형(50:50)", fly_rows),
         ("IRS-국고채", irs_govt_rows), ("선물 저평", futures_rows), ("크레딧", credit_rows),
     ]
 
@@ -468,7 +470,8 @@ def page_main():
 
         _chart_gap()
         st.markdown("#### 주요 스프레드 : 변동")
-        st.caption("CD/CP-통안 스프레드, 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.")
+        st.caption("CD/CP는 통안 단기물 데이터가 없어 기준금리 대비로 대체했습니다. "
+                   "A1CP(6M)/A20CP(6M), 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.")
         st.markdown(_render_spread_matrix_table(_main_spread_sections_cached(EXCEL_PATH.stat().st_mtime)),
                     unsafe_allow_html=True)
 
@@ -1624,22 +1627,48 @@ SHORT_RATE_TREND_ITEMS = [
 ]
 
 
-def _short_rate_dual_chart(label: str, group: str, tenor: str | None, start_date, end_date):
+def _vs_base_rate_hist(group: str, tenor: str | None) -> pd.DataFrame:
+    """(그룹 금리 - 기준금리), bp. 통안 단기물이 없어 기준금리를 대체 준거로 사용."""
     base = df[df["그룹"] == "기준금리"][["날짜", "값"]].rename(columns={"값": "base"})
     inst = curve_history(df, group, tenor)[["날짜", "값"]].rename(columns={"값": "inst"}) if tenor is not None \
         else df[df["그룹"] == group][["날짜", "값"]].rename(columns={"값": "inst"})
     merged = base.merge(inst, on="날짜", how="inner").sort_values("날짜")
-    merged["spread"] = (merged["inst"] - merged["base"]) * 100
-    merged = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+    merged["값"] = (merged["inst"] - merged["base"]) * 100
+    return merged[["날짜", "값"]]
 
+
+def _short_rate_level_view(group: str, tenor: str | None, start_date, end_date) -> pd.DataFrame:
+    base = df[df["그룹"] == "기준금리"][["날짜", "값"]].rename(columns={"값": "base"})
+    inst = curve_history(df, group, tenor)[["날짜", "값"]].rename(columns={"값": "inst"}) if tenor is not None \
+        else df[df["그룹"] == group][["날짜", "값"]].rename(columns={"값": "inst"})
+    merged = base.merge(inst, on="날짜", how="inner").sort_values("날짜")
+    return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+
+def _short_rate_level_chart(label: str, group: str, tenor: str | None, start_date, end_date):
+    """기준금리 + 해당 단기금리를 같은 축(좌축, %)에 겹쳐서 표시."""
+    view = _short_rate_level_view(group, tenor, start_date, end_date)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=merged["날짜"], y=merged["base"], name="기준금리",
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["base"], name="기준금리",
                               line=dict(color="black", width=2, shape="hv")))
-    fig.add_trace(go.Scatter(x=merged["날짜"], y=merged["spread"], name=f"{label}-기준금리",
-                              line=dict(color="#C0392B", width=1.8), yaxis="y2"))
-    fig.update_layout(title=f"기준금리 vs {label}", height=380,
-                       yaxis=dict(title="기준금리(%)"),
-                       yaxis2=dict(title=f"{label}-기준금리(bp)", overlaying="y", side="right"),
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["inst"], name=label, line=dict(color="#2980B9", width=1.8)))
+    fig.update_layout(title=f"기준금리 vs {label}", height=380, yaxis=dict(title="%"),
+                       legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
+    return fig
+
+
+def _short_rate_spread_chart(label: str, group: str, tenor: str | None, start_date, end_date):
+    """스프레드(단기금리-기준금리, bp)는 좌축, 기준금리(%)는 우축."""
+    view = _short_rate_level_view(group, tenor, start_date, end_date)
+    view = view.assign(spread=(view["inst"] - view["base"]) * 100)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["spread"], name=f"{label}-기준금리",
+                              line=dict(color="#C0392B", width=2)))
+    fig.add_trace(go.Scatter(x=view["날짜"], y=view["base"], name="기준금리",
+                              line=dict(color="black", width=1.6, shape="hv"), yaxis="y2"))
+    fig.update_layout(title=f"{label}-기준금리 스프레드", height=380,
+                       yaxis=dict(title=f"{label}-기준금리(bp)"),
+                       yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
                        legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
     return fig
 
@@ -1658,11 +1687,14 @@ def page_short():
         st.markdown(_render_rate_table([("단기금리", rows)], highlight=set()), unsafe_allow_html=True)
 
     with tab_trend:
-        cols = st.columns(2)
-        for i, (label, group, tenor) in enumerate(SHORT_RATE_TREND_ITEMS):
-            with cols[i % 2]:
-                fig = _short_rate_dual_chart(label, group, tenor, start_date, end_date)
-                st.plotly_chart(fig, use_container_width=True, key=f"short_trend_{label}")
+        for label, group, tenor in SHORT_RATE_TREND_ITEMS:
+            cols = st.columns(2)
+            with cols[0]:
+                fig_level = _short_rate_level_chart(label, group, tenor, start_date, end_date)
+                st.plotly_chart(fig_level, use_container_width=True, key=f"short_level_{label}")
+            with cols[1]:
+                fig_spread = _short_rate_spread_chart(label, group, tenor, start_date, end_date)
+                st.plotly_chart(fig_spread, use_container_width=True, key=f"short_spread_{label}")
 
 
 ASSETS_DIR = Path(__file__).parent / "assets"
