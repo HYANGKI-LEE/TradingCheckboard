@@ -224,6 +224,8 @@ def _rate_change_row(label: str, group: str, tenor: str | None = None, scale: fl
         "현재가": round(latest_val, 3),
         "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
+        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
         "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
         "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
         "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
@@ -269,23 +271,38 @@ def _format_bp_html(val) -> str:
     return f"{val:.1f}"
 
 
+def _format_bp_arrow(val) -> str:
+    """+면 파란 위세모, -면 빨간 아래세모 (국내 시황판 관행)."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "-"
+    if val > 0:
+        return f'<span style="color:#2E5EAA">▲{val:.1f}</span>'
+    if val < 0:
+        return f'<span style="color:#C0392B">▼{abs(val):.1f}</span>'
+    return f"{val:.1f}"
+
+
+DEFAULT_CHANGE_COLS = ["1d", "1w", "MTD", "QTD", "YTD"]
+
+
 def _render_rate_table(sections: list, highlight: set, price_label: str = "현재가(%)",
-                        price_decimals: int = 3, change_label: str = "변동(bp)") -> str:
+                        price_decimals: int = 3, change_label: str = "변동(bp)",
+                        change_cols: list = None, formatter=_format_bp_html) -> str:
     """sections: [(섹션제목, [row_dict,...]), ...]. row_dict 는 _rate_change_row 반환값."""
+    change_cols = change_cols or DEFAULT_CHANGE_COLS
+    n = len(change_cols)
     html = ['<table style="width:100%;border-collapse:collapse;font-size:13px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             f'<th style="text-align:right;padding:4px 6px;">{price_label}</th>'
-            f'<th colspan="5" style="text-align:center;padding:4px 6px;">{change_label}</th></tr>'
-            '<tr style="border-bottom:1px solid #999;">'
-            '<th></th><th></th>'
-            '<th style="text-align:right;padding:2px 6px;">1d</th>'
-            '<th style="text-align:right;padding:2px 6px;">1w</th>'
-            '<th style="text-align:right;padding:2px 6px;">MTD</th>'
-            '<th style="text-align:right;padding:2px 6px;">QTD</th>'
-            '<th style="text-align:right;padding:2px 6px;">YTD</th></tr>']
+            f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">{change_label}</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th><th></th>']
+    for col in change_cols:
+        html.append(f'<th style="text-align:right;padding:2px 6px;">{col}</th>')
+    html.append("</tr>")
     for title, rows in sections:
-        html.append(f'<tr><td colspan="7" style="background:#EEE;font-weight:bold;padding:4px 6px;">{title}</td></tr>')
+        html.append(f'<tr><td colspan="{2 + n}" '
+                     f'style="background:#EEE;font-weight:bold;padding:4px 6px;">{title}</td></tr>')
         for row in rows:
             if row is None:
                 continue
@@ -293,8 +310,8 @@ def _render_rate_table(sections: list, highlight: set, price_label: str = "현�
             html.append(f'<tr style="{bg}border-bottom:1px solid #eee;">')
             html.append(f'<td style="padding:3px 6px;">{row["항목"]}</td>')
             html.append(f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.{price_decimals}f}</td>')
-            for col in ["1d", "1w", "MTD", "QTD", "YTD"]:
-                html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+            for col in change_cols:
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{formatter(row[col])}</td>')
             html.append("</tr>")
     html.append("</table>")
     return "".join(html)
@@ -353,20 +370,28 @@ MAIN_CREDIT_ROWS = [
 ]
 
 
+MAIN_CHANGE_COLS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
+
+
 def page_main():
     with _sticky_header():
         st.title("✨ Main")
 
-    st.markdown("#### 주요 금리 : 변동")
-    rate_rows = [_rate_change_row(label, group, tenor) for label, group, tenor in MAIN_RATE_ROWS]
-    credit_rows = [_rate_change_row(f"{label}(3Y)", f"크레딧_{suffix}", "3Y", scale=1)
-                   for label, suffix in MAIN_CREDIT_ROWS]
-    sections = [("금리", rate_rows), ("크레딧", credit_rows)]
-    st.markdown(_render_rate_table(sections, highlight=set()), unsafe_allow_html=True)
+    tab_change, = st.tabs(["변동"])
 
-    _chart_gap()
-    st.markdown("#### 주요 스프레드 : 변동")
-    st.info("이 표는 준비 중입니다 - 필요한 히스토리(장기평균 등)를 확인해서 데이터를 채워주시면 반영할게요.")
+    with tab_change:
+        st.markdown("#### 주요 금리 : 변동")
+        rate_rows = [_rate_change_row(label, group, tenor) for label, group, tenor in MAIN_RATE_ROWS]
+        credit_rows = [_rate_change_row(f"{label}(3Y)", f"크레딧_{suffix}", "3Y", scale=1)
+                       for label, suffix in MAIN_CREDIT_ROWS]
+        sections = [("금리", rate_rows), ("크레딧", credit_rows)]
+        st.markdown(_render_rate_table(sections, highlight=set(), change_label="변동(bp, Tick)",
+                                        change_cols=MAIN_CHANGE_COLS, formatter=_format_bp_arrow),
+                    unsafe_allow_html=True)
+
+        _chart_gap()
+        st.markdown("#### 주요 스프레드 : 변동")
+        st.info("이 표는 준비 중입니다 - 필요한 히스토리(장기평균 등)를 확인해서 데이터를 채워주시면 반영할게요.")
 
 
 # ================================================================ 국내금리
