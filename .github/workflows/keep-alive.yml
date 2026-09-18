@@ -1,0 +1,25 @@
+name: Keep Streamlit app awake
+
+on:
+  schedule:
+    # Streamlit Community Cloud는 12시간 무방문 시 잠드므로 6시간마다 방문
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Visit app to prevent sleep
+        run: python scripts/keep_alive.py
