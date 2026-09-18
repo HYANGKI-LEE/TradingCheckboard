@@ -3,17 +3,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
 
 from data_loader import (
-    CREDIT_GROUPS_ORDER,
     FOREIGN_COUNTRIES_ORDER,
     COMMODITY_ORDER,
     IRS_ZERO_FWD_TENOR_ORDER,
     EXCEL_PATH,
     load_raw_data,
-    latest_curve,
     curve_history,
     credit_spread,
 )
@@ -66,10 +63,6 @@ if is_sample:
         icon="⚠️",
     )
     st.stop()
-
-CURVE_TENORS = ["1Y", "2Y", "3Y", "4Y", "5Y", "10Y", "20Y", "30Y"]
-IRS_TENORS = [t for t in df.loc[df["그룹"] == "IRS", "만기"].dropna().unique()]
-IRS_TENORS = sorted(IRS_TENORS, key=lambda t: (float(t[:-1]) if t.endswith("M") else float(t[:-1]) * 12))
 
 DOMESTIC_RATE_TENORS = ["2Y", "3Y", "10Y", "30Y"]
 DOMESTIC_SPREADS = [("3Y", "1Y"), ("5Y", "3Y"), ("10Y", "3Y"), ("30Y", "10Y")]
@@ -347,7 +340,7 @@ MAIN_RATE_ROWS = [
     ("통안2년", "통안채", "2Y"), ("국고3년", "국고채", "3Y"), ("국고5년", "국고채", "5Y"),
     ("국고10년", "국고채", "10Y"), ("국고30년", "국고채", "30Y"),
     ("미국2년", "미국", "2Y"), ("미국5년", "미국", "5Y"), ("미국10년", "미국", "10Y"),
-    ("CD(3M)", "CD", "91D"), ("A1CP(3M)", "ABCP A1 3개월", None),
+    ("CD(3M)", "CD", "91D"), ("A1CP(3M)", "ABCP A1", "3M"), ("A1CP(1Y)", "ABCP A1", "1Y"),
     ("IRS(6M)", "IRS", "6M"), ("IRS(9M)", "IRS", "9M"), ("IRS(1Y)", "IRS", "1Y"),
     ("IRS(1.5Y)", "IRS", "1.5Y"), ("IRS(2Y)", "IRS", "2Y"),
     ("3선", "선물3년", "내재수익률"), ("10선", "선물10년", "내재수익률"),
@@ -364,6 +357,97 @@ MAIN_CREDIT_ROWS = [
 
 
 MAIN_CHANGE_COLS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
+
+# 국고/미국 만기 스프레드 (장기-단기, bp). 라벨은 이 대시보드 전체에서 쓰는 "장기-단기" 표기로 통일
+GOVT_SPREAD_PAIRS = [("3Y", "1Y"), ("5Y", "3Y"), ("10Y", "3Y"), ("30Y", "10Y")]
+US_SPREAD_PAIRS = [("10Y", "2Y"), ("5Y", "2Y")]
+GOVT_BUTTERFLIES = [("3-5-10(50:50)", "3Y", "5Y", "10Y"), ("3-10-30(50:50)", "3Y", "10Y", "30Y")]
+IRS_GOVT_SPREAD_TENORS = [("6M", 0.5), ("9M", 0.75), ("1Y", 1), ("1.5Y", 1.5), ("2Y", 2)]
+
+
+def _govt_butterfly_hist(short_t: str, mid_t: str, long_t: str) -> pd.DataFrame:
+    """나비형 = 중기 - (단기+장기)/2 (50:50 가중), bp."""
+    a = curve_history(df, "국고채", short_t)[["날짜", "값"]].rename(columns={"값": "s"})
+    b = curve_history(df, "국고채", mid_t)[["날짜", "값"]].rename(columns={"값": "m"})
+    c = curve_history(df, "국고채", long_t)[["날짜", "값"]].rename(columns={"값": "l"})
+    merged = a.merge(b, on="날짜", how="inner").merge(c, on="날짜", how="inner").sort_values("날짜")
+    merged["값"] = (merged["m"] - (merged["s"] + merged["l"]) / 2) * 100
+    return merged[["날짜", "값"]]
+
+
+def _irs_govt_spread_hist(tenor_label: str, tenor_years: float) -> pd.DataFrame:
+    """IRS - 국고채(보간), bp. 국고채에 없는 만기(6M/9M/1.5Y)는 표준만기 선형보간으로 추정."""
+    irs_hist = curve_history(df, "IRS", tenor_label)[["날짜", "값"]].rename(columns={"값": "irs"})
+    govt_wide = _govt_wide_pivot()
+    govt_interp = govt_wide.apply(lambda row: _row_interp(row, tenor_years), axis=1)
+    govt_df = pd.DataFrame({"날짜": govt_wide.index, "govt": govt_interp.values})
+    merged = irs_hist.merge(govt_df, on="날짜", how="inner").sort_values("날짜")
+    merged = merged.dropna(subset=["govt"])
+    merged["값"] = (merged["irs"] - merged["govt"]) * 100
+    return merged[["날짜", "값"]]
+
+
+def _spread_matrix_row(label: str, hist: pd.DataFrame) -> dict | None:
+    row = _rate_change_row_from_hist(hist, scale=1)
+    return {**row, "항목": label} if row else None
+
+
+def _render_spread_matrix_table(sections: list) -> str:
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+            '<tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:4px 6px;">항목</th>'
+            '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
+            '<th colspan="5" style="text-align:center;padding:4px 6px;">변동(bp, Tick)</th>'
+            '<th colspan="4" style="text-align:center;padding:4px 6px;">과거평균(bp)</th></tr>'
+            '<tr style="border-bottom:1px solid #999;"><th></th><th></th>'
+            '<th style="text-align:right;padding:2px 6px;">1d</th>'
+            '<th style="text-align:right;padding:2px 6px;">1w</th>'
+            '<th style="text-align:right;padding:2px 6px;">MTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">QTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">YTD</th>'
+            '<th style="text-align:right;padding:2px 6px;">1Y</th>'
+            '<th style="text-align:right;padding:2px 6px;">3Y</th>'
+            '<th style="text-align:right;padding:2px 6px;">5Y</th>'
+            '<th style="text-align:right;padding:2px 6px;">장기</th></tr>']
+    for title, rows in sections:
+        html.append(f'<tr><td colspan="11" style="background:#EEE;font-weight:bold;padding:4px 6px;">'
+                     f'{title}</td></tr>')
+        for row in rows:
+            if row is None:
+                continue
+            html.append('<tr style="border-bottom:1px solid #eee;">'
+                         f'<td style="padding:3px 6px;">{row["항목"]}</td>'
+                         f'<td style="text-align:right;padding:3px 6px;">{row["현재가"]:.1f}</td>')
+            for col in ["1d", "1w", "MTD", "QTD", "YTD"]:
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{_format_bp_html(row[col])}</td>')
+            for col in ["1Y_avg", "3Y_avg", "5Y_avg", "전체_avg"]:
+                v = row[col]
+                cell = f"{v:.1f}" if v is not None else "-"
+                html.append(f'<td style="text-align:right;padding:3px 6px;">{cell}</td>')
+            html.append("</tr>")
+    html.append("</table>")
+    return "".join(html)
+
+
+@st.cache_data(show_spinner="주요 스프레드 계산 중...")
+def _main_spread_sections_cached(_mtime: float) -> list:
+    govt_rows = [_spread_matrix_row(f"국고 {lg}-{sh}", _tenor_spread_view("국고채", lg, sh, df["날짜"].min().date(),
+                                                                        df["날짜"].max().date()))
+                 for lg, sh in GOVT_SPREAD_PAIRS]
+    us_rows = [_spread_matrix_row(f"미국 {lg}-{sh}", _tenor_spread_view("미국", lg, sh, df["날짜"].min().date(),
+                                                                      df["날짜"].max().date()))
+               for lg, sh in US_SPREAD_PAIRS]
+    fly_rows = [_spread_matrix_row(label, _govt_butterfly_hist(s, m, l)) for label, s, m, l in GOVT_BUTTERFLIES]
+    irs_govt_rows = [_spread_matrix_row(f"IRS-국고채({t})", _irs_govt_spread_hist(t, ty))
+                      for t, ty in IRS_GOVT_SPREAD_TENORS]
+    futures_rows = [_spread_matrix_row("3선 저평", _futures_richness_bp("선물3년")),
+                     _spread_matrix_row("10선 저평", _futures_richness_bp("선물10년"))]
+    credit_rows = [_spread_matrix_row(f"{label}(3Y)", curve_history(df, f"크레딧_{suffix}", "3Y")[["날짜", "값"]])
+                   for label, suffix in MAIN_CREDIT_ROWS]
+    return [
+        ("국고", govt_rows), ("미국", us_rows), ("나비형(50:50)", fly_rows),
+        ("IRS-국고채", irs_govt_rows), ("선물 저평", futures_rows), ("크레딧", credit_rows),
+    ]
 
 
 def page_main():
@@ -384,7 +468,9 @@ def page_main():
 
         _chart_gap()
         st.markdown("#### 주요 스프레드 : 변동")
-        st.info("이 표는 준비 중입니다 - 필요한 히스토리(장기평균 등)를 확인해서 데이터를 채워주시면 반영할게요.")
+        st.caption("CD/CP-통안 스프레드, 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.")
+        st.markdown(_render_spread_matrix_table(_main_spread_sections_cached(EXCEL_PATH.stat().st_mtime)),
+                    unsafe_allow_html=True)
 
 
 # ================================================================ 국내금리
@@ -498,6 +584,11 @@ def _rate_change_row_from_hist(hist: pd.DataFrame, scale: float = 100) -> dict |
         prior = hist_upto[hist_upto["날짜"].dt.date <= ref_date]
         return round((latest_val - prior.iloc[-1]["값"]) * scale, 1) if not prior.empty else None
 
+    def avg(years: float | None):
+        sub = hist_upto if years is None else \
+            hist_upto[hist_upto["날짜"].dt.date >= latest_date - pd.Timedelta(days=int(365 * years))]
+        return round(sub["값"].mean(), 1) if not sub.empty else None
+
     return {
         "현재가": round(latest_val, 3),
         "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
@@ -505,6 +596,7 @@ def _rate_change_row_from_hist(hist: pd.DataFrame, scale: float = 100) -> dict |
         "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
         "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
         "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "1Y_avg": avg(1), "3Y_avg": avg(3), "5Y_avg": avg(5), "전체_avg": avg(None),
     }
 
 
@@ -1516,147 +1608,61 @@ def page_stock():
             st.plotly_chart(fig2, use_container_width=True, key="stock_yieldgap")
 
 
-# ================================================================ 신용스프레드
-def page_credit():
-    with _sticky_header():
-        st.title("🏦 신용스프레드")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        base_group2 = st.segmented_control("기준 커브", ["국고채", "통안채"], default="국고채", key="credit_base")
-        base_group2 = base_group2 or "국고채"
-    with col_b:
-        credit_options = [g for g in CREDIT_GROUPS_ORDER if g not in ("국고채", "통안채")]
-        credit_group = st.selectbox("비교할 신용채권", credit_options, key="credit_group")
-
-    spread_df = credit_spread(df, credit_group, base_group2)
-    latest_spread_date = spread_df["날짜"].max()
-    latest_spread = spread_df[spread_df["날짜"] == latest_spread_date]
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader(f"{credit_group} vs {base_group2} 금리커브 ({latest_spread_date:%Y-%m-%d})")
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(x=latest_spread["만기"], y=latest_spread["기준금리"],
-                                   mode="lines+markers", name=base_group2))
-        fig3.add_trace(go.Scatter(x=latest_spread["만기"], y=latest_spread["그룹금리"],
-                                   mode="lines+markers", name=credit_group))
-        fig3.update_layout(xaxis_title="만기", yaxis_title="금리 (%)", height=380,
-                            legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
-        st.plotly_chart(fig3, use_container_width=True)
-
-        st.subheader(f"신용스프레드 ({credit_group} − {base_group2}, bp)")
-        fig4 = px.bar(latest_spread, x="만기", y="스프레드_bp")
-        fig4.update_layout(height=320, yaxis_title="bp", margin=dict(t=10))
-        st.plotly_chart(fig4, use_container_width=True)
-
-    with col2:
-        st.subheader("스프레드 히스토리")
-        available_tenors = [t for t in CURVE_TENORS if t in spread_df["만기"].unique()]
-        spread_tenor = st.selectbox("만기 선택", available_tenors,
-                                     index=available_tenors.index("3Y") if "3Y" in available_tenors else 0,
-                                     key="credit_tenor")
-        hist_spread = spread_df[spread_df["만기"] == spread_tenor].sort_values("날짜")
-        fig5 = px.line(hist_spread, x="날짜", y="스프레드_bp")
-        fig5.update_layout(height=280, yaxis_title="bp", margin=dict(t=10))
-        st.plotly_chart(fig5, use_container_width=True)
-
-        st.subheader("등급 사다리 (선택 만기, bp)")
-        ladder_tenor = st.selectbox("만기 선택 ", available_tenors,
-                                     index=available_tenors.index("3Y") if "3Y" in available_tenors else 0,
-                                     key="ladder_tenor")
-        ladder_rows = []
-        for g in credit_options:
-            gs = credit_spread(df, g, base_group2)
-            gs_latest = gs[(gs["만기"] == ladder_tenor) & (gs["날짜"] == gs["날짜"].max())]
-            if not gs_latest.empty:
-                ladder_rows.append({"그룹": g, "스프레드_bp": gs_latest["스프레드_bp"].iloc[0]})
-        ladder_df = pd.DataFrame(ladder_rows)
-        fig6 = px.bar(ladder_df, x="스프레드_bp", y="그룹", orientation="h")
-        fig6.update_layout(height=430, margin=dict(t=10), yaxis=dict(categoryorder="total ascending"))
-        st.plotly_chart(fig6, use_container_width=True)
-
-    st.subheader("스프레드 데이터 테이블 (최근 스냅샷)")
-    st.dataframe(
-        latest_spread[["만기", "기준금리", "그룹금리", "스프레드_bp"]]
-        .rename(columns={"기준금리": f"{base_group2}(%)", "그룹금리": f"{credit_group}(%)"})
-        .reset_index(drop=True),
-        use_container_width=True,
-    )
-
-
-# ================================================================ IRS
-def page_irs():
-    with _sticky_header():
-        st.title("🔁 IRS 커브 / 본드스왑 스프레드")
-
-    latest_irs = latest_curve(df, "IRS")
-    latest_irs_date = latest_irs["날짜"].max()
-    irs_spread_df = credit_spread(df, "IRS", "국고채")
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        st.subheader(f"IRS 금리커브 ({latest_irs_date:%Y-%m-%d})")
-        fig7 = go.Figure()
-        fig7.add_trace(go.Scatter(x=latest_irs["만기"], y=latest_irs["값"], mode="lines+markers", name="IRS"))
-        latest_govt = latest_curve(df, "국고채")
-        fig7.add_trace(go.Scatter(x=latest_govt["만기"], y=latest_govt["값"], mode="lines+markers", name="국고채"))
-        fig7.update_layout(xaxis_title="만기", yaxis_title="금리 (%)", height=380,
-                            legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
-        st.plotly_chart(fig7, use_container_width=True)
-
-        st.subheader("본드스왑 스프레드 (IRS − 국고채, bp, 공통 만기)")
-        latest_irs_spread = irs_spread_df[irs_spread_df["날짜"] == irs_spread_df["날짜"].max()]
-        fig8 = px.bar(latest_irs_spread, x="만기", y="스프레드_bp")
-        fig8.update_layout(height=320, yaxis_title="bp", margin=dict(t=10))
-        st.plotly_chart(fig8, use_container_width=True)
-
-    with col2:
-        st.subheader("IRS 만기별 히스토리")
-        irs_tenor = st.selectbox("만기 선택", IRS_TENORS,
-                                  index=IRS_TENORS.index("3Y") if "3Y" in IRS_TENORS else 0, key="irs_hist_tenor")
-        irs_hist = curve_history(df, "IRS", irs_tenor)
-        fig9 = px.line(irs_hist, x="날짜", y="값")
-        fig9.update_layout(height=280, yaxis_title="금리 (%)", margin=dict(t=10))
-        st.plotly_chart(fig9, use_container_width=True)
-
-        st.subheader("본드스왑 스프레드 히스토리")
-        common_tenors = [t for t in CURVE_TENORS if t in irs_spread_df["만기"].unique()]
-        bs_tenor = st.selectbox("만기 선택", common_tenors,
-                                 index=common_tenors.index("3Y") if "3Y" in common_tenors else 0, key="bs_tenor")
-        bs_hist = irs_spread_df[irs_spread_df["만기"] == bs_tenor].sort_values("날짜")
-        fig10 = px.line(bs_hist, x="날짜", y="스프레드_bp")
-        fig10.add_hline(y=0, line_dash="dot", line_color="gray")
-        fig10.update_layout(height=430, yaxis_title="bp", margin=dict(t=10))
-        st.plotly_chart(fig10, use_container_width=True)
-
-    st.subheader("IRS 데이터 테이블 (최근 스냅샷)")
-    st.dataframe(latest_irs[["만기", "값"]].rename(columns={"값": "IRS(%)"}).reset_index(drop=True),
-                 use_container_width=True)
-
-
 # ================================================================ 단기금리
+SHORT_RATE_ROWS = [
+    ("기준금리", "기준금리", None),
+    ("REPO(1일)", "REPO", "1일"),
+    ("REPO(7일)", "REPO", "7일"),
+    ("CD(3M)", "CD", "91D"),
+    ("A1CP(3M)", "ABCP A1", "3M"),
+    ("A1CP(1Y)", "ABCP A1", "1Y"),
+]
+# 추이 탭: 기준금리(좌축) vs 각 단기금리-기준금리 스프레드(우축)
+SHORT_RATE_TREND_ITEMS = [
+    ("REPO(1일)", "REPO", "1일"), ("REPO(7일)", "REPO", "7일"), ("CD(3M)", "CD", "91D"),
+    ("A1CP(3M)", "ABCP A1", "3M"), ("A1CP(1Y)", "ABCP A1", "1Y"),
+]
+
+
+def _short_rate_dual_chart(label: str, group: str, tenor: str | None, start_date, end_date):
+    base = df[df["그룹"] == "기준금리"][["날짜", "값"]].rename(columns={"값": "base"})
+    inst = curve_history(df, group, tenor)[["날짜", "값"]].rename(columns={"값": "inst"}) if tenor is not None \
+        else df[df["그룹"] == group][["날짜", "값"]].rename(columns={"값": "inst"})
+    merged = base.merge(inst, on="날짜", how="inner").sort_values("날짜")
+    merged["spread"] = (merged["inst"] - merged["base"]) * 100
+    merged = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=merged["날짜"], y=merged["base"], name="기준금리",
+                              line=dict(color="black", width=2, shape="hv")))
+    fig.add_trace(go.Scatter(x=merged["날짜"], y=merged["spread"], name=f"{label}-기준금리",
+                              line=dict(color="#C0392B", width=1.8), yaxis="y2"))
+    fig.update_layout(title=f"기준금리 vs {label}", height=380,
+                       yaxis=dict(title="기준금리(%)"),
+                       yaxis2=dict(title=f"{label}-기준금리(bp)", overlaying="y", side="right"),
+                       legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
+    return fig
+
+
 def page_short():
     with _sticky_header():
         st.title("📉 단기금리")
+        base_dates = df.loc[df["그룹"] == "기준금리", "날짜"]
+        min_date, max_date = base_dates.min().date(), base_dates.max().date()
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="short", default="1Y")
 
-    st.subheader("기준금리 / CD(91일) 히스토리")
-    base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜").rename(columns={"값": "기준금리"})
-    cd91 = df[df["그룹"] == "CD"][["날짜", "값"]].sort_values("날짜").rename(columns={"값": "CD(91일)"})
+    tab_change, tab_trend = st.tabs(["변동", "추이"])
 
-    fig11 = go.Figure()
-    fig11.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["기준금리"], mode="lines", name="기준금리",
-                                line=dict(shape="hv")))
-    fig11.add_trace(go.Scatter(x=cd91["날짜"], y=cd91["CD(91일)"], mode="lines", name="CD(91일)"))
-    fig11.update_layout(xaxis_title="날짜", yaxis_title="금리 (%)", height=480,
-                         legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
-    st.plotly_chart(fig11, use_container_width=True)
+    with tab_change:
+        rows = [_rate_change_row(label, group, tenor) for label, group, tenor in SHORT_RATE_ROWS]
+        st.markdown(_render_rate_table([("단기금리", rows)], highlight=set()), unsafe_allow_html=True)
 
-    st.subheader("데이터 테이블 (최근 20영업일)")
-    merged = pd.merge(base_rate, cd91, on="날짜", how="outer").sort_values("날짜", ascending=False)
-    st.dataframe(merged.head(20).reset_index(drop=True), use_container_width=True)
+    with tab_trend:
+        cols = st.columns(2)
+        for i, (label, group, tenor) in enumerate(SHORT_RATE_TREND_ITEMS):
+            with cols[i % 2]:
+                fig = _short_rate_dual_chart(label, group, tenor, start_date, end_date)
+                st.plotly_chart(fig, use_container_width=True, key=f"short_trend_{label}")
 
 
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -1757,7 +1763,7 @@ def _yeojeonchae_bss_2y_view(start_date, end_date) -> pd.DataFrame:
 
 
 def _abcp_view(start_date, end_date) -> pd.DataFrame:
-    hist = df[df["그룹"] == "ABCP A1 3개월"][["날짜", "값"]].sort_values("날짜")
+    hist = curve_history(df, "ABCP A1", "3M")[["날짜", "값"]].sort_values("날짜")
     return hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
 
 
@@ -1891,14 +1897,12 @@ nav = st.navigation([
     st.Page(page_main, title="Main", icon="✨", default=True),
     st.Page(page_domestic_rate, title="국내금리", icon="🏛️"),
     st.Page(page_credit_detail, title="크레딧", icon="🏢"),
+    st.Page(page_short, title="단기금리", icon="📉"),
     st.Page(page_irs_detail, title="IRS", icon="🔁"),
     st.Page(page_relative_value, title="Relative Value", icon="⚖️"),
     st.Page(page_foreign_rate, title="해외금리", icon="🌍"),
     st.Page(page_fx, title="FX", icon="💱"),
     st.Page(page_commodity, title="원자재", icon="🛢️"),
     st.Page(page_stock, title="주식", icon="📈"),
-    st.Page(page_credit, title="신용스프레드", icon="🏦"),
-    st.Page(page_irs, title="IRS 커브 / 본드스왑 스프레드", icon="🔁"),
-    st.Page(page_short, title="단기금리", icon="📉"),
 ], position="sidebar")
 nav.run()

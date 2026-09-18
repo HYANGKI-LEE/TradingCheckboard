@@ -182,7 +182,17 @@ def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tup
     if sheet_hint == "주가":
         return (title, None) if title else None
     if title == "CP 4사평균 A1":
-        return ("ABCP A1 3개월", None)
+        # 같은 제목의 블록이 두 개(3개월물/1년물) 있어서 서브헤더로 구분해야 함
+        sub_s = (sub or "").strip()
+        if sub_s.startswith("3월"):
+            return ("ABCP A1", "3M")
+        if sub_s.startswith("1년"):
+            return ("ABCP A1", "1Y")
+        return None
+    if title == "REPO 종합 1일물":
+        return ("REPO", "1일")
+    if title == "REPO 종합 7일물":
+        return ("REPO", "7일")
     if title.startswith(_CURVE_PREFIX):
         name = title[len(_CURVE_PREFIX):].replace("(공모/무보증)", "")
         name = name.replace("금융채 ", "").replace(" ", "")
