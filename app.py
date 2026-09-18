@@ -38,6 +38,13 @@ st.markdown(
         background-color: var(--background-color, white);
         padding-bottom: 0.4rem;
     }
+    /* 왼쪽 사이드바 최상위 탭 목록 글씨 크기 */
+    a[data-testid="stSidebarNavLink"] p {
+        font-size: 1.05rem;
+    }
+    a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"] {
+        font-size: 1.15rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -277,7 +284,7 @@ def _render_rate_table(sections: list, highlight: set, price_label: str = "현�
     """sections: [(섹션제목, [row_dict,...]), ...]. row_dict 는 _rate_change_row 반환값."""
     change_cols = change_cols or DEFAULT_CHANGE_COLS
     n = len(change_cols)
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:13px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             f'<th style="text-align:right;padding:4px 6px;">{price_label}</th>'
@@ -393,7 +400,7 @@ def _spread_matrix_row(label: str, hist: pd.DataFrame) -> dict | None:
 
 
 def _render_spread_matrix_table(sections: list) -> str:
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
@@ -607,7 +614,7 @@ def _render_credit_wide_table(metric: str, row_fn, current_label: str, current_d
                                change_label: str = "변동(bp)") -> str:
     tenors = CREDIT_DETAIL_TENORS
     n = len(tenors)
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">유형</th>'
             f'<th colspan="{n}" style="text-align:center;padding:4px 6px;">{current_label}</th>'
@@ -994,7 +1001,7 @@ def _irs_ktb_stats(tenor: str) -> dict | None:
 
 
 def _render_irs_ktb_table(rows: list) -> str:
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
@@ -1061,7 +1068,7 @@ def _irs_spread_matrix_row(long_t: str, short_t: str) -> dict | None:
 
 
 def _render_irs_spread_matrix(rows: list) -> str:
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             '<th style="text-align:right;padding:4px 6px;">현재가(bp)</th>'
@@ -1121,7 +1128,7 @@ def _irs_forward_row(tenor: str) -> dict | None:
 
 
 def _render_irs_forward_table(rows: list) -> str:
-    html = ['<table style="width:100%;border-collapse:collapse;font-size:12.5px;">',
+    html = ['<table style="width:100%;border-collapse:collapse;font-size:15px;">',
             '<tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:4px 6px;">항목</th>'
             '<th style="text-align:right;padding:4px 6px;">현재가(%)</th>'
@@ -1673,6 +1680,16 @@ def _short_rate_spread_chart(label: str, group: str, tenor: str | None, start_da
     return fig
 
 
+@st.cache_data(show_spinner=False)
+def _short_rate_level_chart_cached(label, group, tenor, start_date, end_date, _mtime: float):
+    return _short_rate_level_chart(label, group, tenor, start_date, end_date)
+
+
+@st.cache_data(show_spinner=False)
+def _short_rate_spread_chart_cached(label, group, tenor, start_date, end_date, _mtime: float):
+    return _short_rate_spread_chart(label, group, tenor, start_date, end_date)
+
+
 def page_short():
     with _sticky_header():
         st.title("📉 단기금리")
@@ -1687,13 +1704,14 @@ def page_short():
         st.markdown(_render_rate_table([("단기금리", rows)], highlight=set()), unsafe_allow_html=True)
 
     with tab_trend:
+        mtime = EXCEL_PATH.stat().st_mtime
         for label, group, tenor in SHORT_RATE_TREND_ITEMS:
             cols = st.columns(2)
             with cols[0]:
-                fig_level = _short_rate_level_chart(label, group, tenor, start_date, end_date)
+                fig_level = _short_rate_level_chart_cached(label, group, tenor, start_date, end_date, mtime)
                 st.plotly_chart(fig_level, use_container_width=True, key=f"short_level_{label}")
             with cols[1]:
-                fig_spread = _short_rate_spread_chart(label, group, tenor, start_date, end_date)
+                fig_spread = _short_rate_spread_chart_cached(label, group, tenor, start_date, end_date, mtime)
                 st.plotly_chart(fig_spread, use_container_width=True, key=f"short_spread_{label}")
 
 
