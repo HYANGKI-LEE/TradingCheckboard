@@ -260,6 +260,8 @@ def _pct_change_row(label: str, hist: pd.DataFrame, decimals: int = 2) -> dict |
         "현재가": round(latest_val, decimals),
         "1d": round((latest_val - prev_val) / prev_val * 100, 2) if prev_val else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
+        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
+        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
         "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
         "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
         "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
