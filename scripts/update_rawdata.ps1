@@ -6,23 +6,37 @@ Infomax RawData.xlsx 자동 업데이트 스크립트.
 Infomax 백그라운드 서비스(InfomaxMain.exe 등)가 로그인된 상태로 떠 있어야 실제 데이터가
 갱신된다 - Excel 자체가 켜져 있을 필요는 없음, 별도로 확인됨).
 
+파일이 두 개로 분리되어 있다:
+  - RawData_master.xlsx : IMDH 수식이 살아있는 원본(로컬 전용, git 추적 안 함).
+    매일 이 파일을 열어서 재조회 매크로를 실행/저장한다. Excel(COM)으로 저장할 때마다
+    공유 수식이 풀리면서 용량이 부풀어오르지만(관찰: +22%), 로컬에만 있으니 문제없음.
+  - RawData.xlsx : compact_rawdata.py로 마스터에서 "값만" 추출한 가벼운 사본.
+    git에 커밋/배포하는 건 이 파일 - 수식이 없으니 용량이 작고, 앱은 어차피
+    openpyxl로 값만 읽으므로(data_only=True) 기능상 차이가 없다.
+    (이 분리는 2026-09-21 파일 용량 폭증으로 Streamlit Cloud 앱이 OOM으로
+    다운된 사고 이후 재발 방지를 위해 도입함)
+
 동작 순서:
-  1. RawData.xlsx를 임시 경로로 복사 (원본 보호 - refresh 도중 문제가 생겨도 원본은 안전)
+  1. RawData_master.xlsx를 임시 경로로 복사 (원본 보호 - refresh 도중 문제가 생겨도 원본은 안전)
   2. 그 복사본을 Excel(COM)으로 열고 Infomax 애드인의 히스토리 재조회 매크로 실행
      (IMxl_OnRefreshData - 리본 로드 시점에만 연결되는 구조라 XLL을 직접 RegisterXLL로 로드)
   3. 재계산 대기 후 저장
   4. 각 시트의 최신 날짜를 원본과 비교해서 로그 기록
-  5. 갱신된 복사본을 원본 경로로 교체
-  6. git add/commit/push
+  5. 갱신된 복사본을 마스터 경로로 교체
+  6. compact_rawdata.py로 마스터 -> 배포용 RawData.xlsx 재생성
+  7. git add/commit/push (배포용 RawData.xlsx만)
 
-실패해도 원본 파일은 절대 건드리지 않고(1단계에서 복사본에만 작업), 로그 파일에
+실패해도 마스터 파일은 절대 건드리지 않고(1단계에서 복사본에만 작업), 로그 파일에
 결과를 남긴다 - 사람이 옆에 없어도 나중에 로그로 성공/실패를 확인할 수 있음.
 #>
 
 $ErrorActionPreference = "Stop"
 
 $RepoDir = "C:\Users\infomax\Desktop\이향기\TradingCheckboard"
-$RawDataPath = Join-Path $RepoDir "data\RawData.xlsx"
+$MasterPath = Join-Path $RepoDir "data\RawData_master.xlsx"
+$DeployPath = Join-Path $RepoDir "data\RawData.xlsx"
+$CompactScript = Join-Path $RepoDir "scripts\compact_rawdata.py"
+$PythonExe = "C:\Python314\python.exe"
 $TempCopyPath = Join-Path $env:TEMP "RawData_autoupdate_working.xlsx"
 $LogDir = Join-Path $RepoDir "scripts\logs"
 $LogPath = Join-Path $LogDir "update_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
@@ -46,8 +60,8 @@ if ($today.DayOfWeek -eq [DayOfWeek]::Saturday -or $today.DayOfWeek -eq [DayOfWe
 
 Write-Log "=== RawData.xlsx 자동 업데이트 시작 ==="
 
-if (-not (Test-Path $RawDataPath)) {
-    Write-Log "ERROR: 원본 파일을 찾을 수 없습니다: $RawDataPath"
+if (-not (Test-Path $MasterPath)) {
+    Write-Log "ERROR: 마스터 파일을 찾을 수 없습니다: $MasterPath"
     exit 1
 }
 
@@ -63,7 +77,7 @@ if (Test-Path $TempCopyPath) {
     Remove-Item $TempCopyPath -Force -ErrorAction SilentlyContinue
 }
 
-Copy-Item -Path $RawDataPath -Destination $TempCopyPath -Force
+Copy-Item -Path $MasterPath -Destination $TempCopyPath -Force
 Write-Log "임시 복사본 생성: $TempCopyPath"
 
 $excel = $null
@@ -164,20 +178,32 @@ try {
 }
 
 if (-not $success) {
-    Write-Log "재조회 실패 - 원본 파일은 건드리지 않고 종료합니다."
+    Write-Log "재조회 실패 - 마스터 파일은 건드리지 않고 종료합니다."
     Remove-Item $TempCopyPath -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
-Copy-Item -Path $TempCopyPath -Destination $RawDataPath -Force
+Copy-Item -Path $TempCopyPath -Destination $MasterPath -Force
 Remove-Item $TempCopyPath -Force -ErrorAction SilentlyContinue
-Write-Log "원본 파일 교체 완료"
+Write-Log "마스터 파일 교체 완료"
 
 Set-Location $RepoDir
-# git push 등은 정상 진행 상황도 stderr로 출력하는 경우가 많은데, $ErrorActionPreference=Stop 상태에서
-# 2>&1로 합치면 그게 다 터미네이팅 에러로 취급돼서 스크립트가 죽는다 - git 구간만 Continue로 완화
+# python/git 등 외부 프로세스는 정상 진행 상황도 stderr로 출력하는 경우가 많은데,
+# $ErrorActionPreference=Stop 상태에서 2>&1로 합치면 그게 다 터미네이팅 에러로 취급돼서
+# 스크립트가 죽는다(git push 때 실제로 겪었던 버그) - 이 구간은 Continue로 완화하고
+# 대신 각 단계의 $LASTEXITCODE를 직접 확인한다.
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
+
+$beforeSize = (Get-Item $DeployPath).Length
+& $PythonExe $CompactScript $MasterPath $DeployPath 2>&1 | ForEach-Object { Write-Log "compact: $_" }
+if ($LASTEXITCODE -ne 0) {
+    Write-Log "ERROR: 압축 스크립트 실패(exit $LASTEXITCODE) - 배포용 파일은 이전 상태로 유지, git push 스킵"
+    $ErrorActionPreference = $prevEAP
+    exit 1
+}
+$afterSize = (Get-Item $DeployPath).Length
+Write-Log "배포용 RawData.xlsx 재생성 완료 (${beforeSize}B -> ${afterSize}B)"
 
 & git add "data/RawData.xlsx" 2>&1 | ForEach-Object { Write-Log "git: $_" }
 $diffCheck = & git diff --cached --stat 2>&1
