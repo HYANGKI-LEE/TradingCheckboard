@@ -33,13 +33,6 @@ st.markdown(
         padding-top: 0.5rem;
         padding-bottom: 0.4rem;
     }
-    div:has(> div[class*="st-key-sticky_subheader_"]) {
-        position: sticky;
-        top: 9.35rem;
-        z-index: 998;
-        background-color: var(--background-color, white);
-        padding-bottom: 0.4rem;
-    }
     /* 왼쪽 사이드바 최상위 탭 목록 글씨 크기 */
     a[data-testid="stSidebarNavLink"] p {
         font-size: 1.05rem;
@@ -58,9 +51,55 @@ def _sticky_header():
     return st.container(key="sticky_header")
 
 
+def _sticky_bar(key: str, top_rem: float, z_index: int = 997):
+    """임의의 위젯(탭 목록, 탭 내부 선택 위젯 등)을 화면 상단 top_rem 위치에 고정.
+    페이지마다 그 위에 쌓인 sticky 요소들의 높이가 달라서 top 값을 직접 지정해야 함."""
+    st.markdown(
+        f"""<style>
+        div:has(> div.st-key-{key}) {{
+            position: sticky;
+            top: {top_rem}rem;
+            z-index: {z_index};
+            background-color: var(--background-color, white);
+            padding-bottom: 0.3rem;
+        }}
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    return st.container(key=key)
+
+
+def _sticky_tabbar(marker_key: str, top_rem: float):
+    """st.tabs()가 만드는 컴포넌트는 탭 내용 전체(패널 포함)를 통째로 감싸는 큰 블록이라
+    컨테이너 자체에 sticky를 걸면 안 붙는다(내용이 너무 커서 그런지 실제로 안 고정됨) -
+    그 안의 탭 라벨 줄([data-baseweb="tab-list"], 높이 고정)만 골라 고정시킨다."""
+    st.markdown(
+        f"""<style>
+        .st-key-{marker_key} [role="tablist"] {{
+            position: sticky;
+            top: {top_rem}rem;
+            z-index: 997;
+            background-color: var(--background-color, white);
+        }}
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    return st.container(key=marker_key)
+
+
+# 제목만 있는 헤더(예: 크레딧, Relative Value) 바로 아래 - 탭 목록 고정
+def _sticky_tabbar_short():
+    return _sticky_tabbar("sticky_tabbar_short", top_rem=8.85)
+
+
+# 제목 + 전체 탭 공용 기간선택이 같이 있는 헤더 바로 아래 - 탭 목록 고정
+def _sticky_tabbar_tall():
+    return _sticky_tabbar("sticky_tabbar_tall", top_rem=13.6)
+
+
 def _sticky_subheader(key: str):
-    """(탭 내부에 있는) 기간 선택 위젯을 제목 바로 아래에 고정. 탭마다 렌더링되므로 key는 탭별로 달라야 함."""
-    return st.container(key=f"sticky_subheader_{key}")
+    """탭 목록(_sticky_tabbar_short) 바로 아래, 탭 내부 첫 선택 위젯(기간선택/변동기준 등)을 고정."""
+    return _sticky_bar(f"sticky_subheader_{key}", top_rem=11.6, z_index=996)
 
 
 df, is_sample = load_raw_data()
@@ -465,7 +504,8 @@ def page_main():
     with _sticky_header():
         st.title("✨ Main")
 
-    tab_change, = st.tabs(["변동"])
+    with _sticky_tabbar_short():
+        tab_change, = st.tabs(["변동"])
 
     with tab_change:
         st.markdown("#### 주요 금리 : 변동")
@@ -492,7 +532,8 @@ def page_domestic_rate():
         st.title("🏛️ 국내금리")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="domestic", default="1Y")
 
-    tab_change, tab_rates, tab_spread, tab_futures = st.tabs(["변동", "Rates", "스프레드", "선물"])
+    with _sticky_tabbar_tall():
+        tab_change, tab_rates, tab_spread, tab_futures = st.tabs(["변동", "Rates", "스프레드", "선물"])
 
     with tab_change:
         st.markdown("#### 주요 금리")
@@ -871,11 +912,13 @@ def page_credit_detail():
     credit_dates = df.loc[df["그룹"].str.startswith("크레딧_", na=False), "날짜"]
     min_date, max_date = credit_dates.min().date(), credit_dates.max().date()
 
-    tab_change, tab_spread, tab_excess, tab_rate = st.tabs(["변동", "스프레드", "초과기대수익률", "금리"])
+    with _sticky_tabbar_short():
+        tab_change, tab_spread, tab_excess, tab_rate = st.tabs(["변동", "스프레드", "초과기대수익률", "금리"])
 
     with tab_change:
-        metric = st.segmented_control("변동 기준", DELTA_METRIC_OPTIONS, default="1d",
-                                       key="credit_detail_metric") or "1d"
+        with _sticky_subheader("credit_change"):
+            metric = st.segmented_control("변동 기준", DELTA_METRIC_OPTIONS, default="1d",
+                                           key="credit_detail_metric") or "1d"
         st.markdown("#### 크레딧 스프레드 : 테너별")
         st.markdown(_render_credit_wide_table(metric, lambda g, t: _rate_change_row("", g, t, scale=1),
                                                "현재값(bp)", 1, "변동(bp)"), unsafe_allow_html=True)
@@ -1174,9 +1217,10 @@ def page_irs_detail():
         start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
     available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
-    tab_change, tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
-        ["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"]
-    )
+    with _sticky_tabbar_tall():
+        tab_change, tab_par, tab_spread, tab_zero, tab_fwd, tab_fly = st.tabs(
+            ["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"]
+        )
 
     with tab_change:
         st.markdown("#### IRS(%)")
@@ -1349,9 +1393,10 @@ def page_foreign_rate():
         st.title("🌍 해외금리")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="foreign", default="1Y")
 
-    tab_change, tab_rates, tab_spread_period, tab_spread_country = st.tabs(
-        ["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"]
-    )
+    with _sticky_tabbar_tall():
+        tab_change, tab_rates, tab_spread_period, tab_spread_country = st.tabs(
+            ["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"]
+        )
 
     with tab_change:
         st.caption("만기: 10Y 기준")
@@ -1466,7 +1511,8 @@ def page_fx():
         st.title("💱 FX")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="fx", default="1Y")
 
-    tab_change, tab_chart = st.tabs(["변동", "차트"])
+    with _sticky_tabbar_tall():
+        tab_change, tab_chart = st.tabs(["변동", "차트"])
 
     with tab_change:
         rows = [_fx_change_row(g, is_cross, min_date, max_date) for g, is_cross in FX_ORDER]
@@ -1532,7 +1578,8 @@ def page_commodity():
         st.title("🛢️ 원자재")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="commodity", default="1Y")
 
-    tab_change, tab_chart = st.tabs(["변동", "차트"])
+    with _sticky_tabbar_tall():
+        tab_change, tab_chart = st.tabs(["변동", "차트"])
 
     with tab_change:
         sections = []
@@ -1588,7 +1635,8 @@ def page_stock():
         st.title("📈 주식")
         start_date, end_date = period_selector(min_date, max_date, key_prefix="stock", default="5Y")
 
-    tab_yieldgap, tab_indices = st.tabs(["Yield Gap", "주가추이"])
+    with _sticky_tabbar_tall():
+        tab_yieldgap, tab_indices = st.tabs(["Yield Gap", "주가추이"])
 
     with tab_indices:
         available = [g for g in STOCK_INDEX_ORDER if not df.loc[df["그룹"] == g].empty]
@@ -1741,7 +1789,8 @@ def page_short():
         min_date, max_date = base_dates.min().date(), base_dates.max().date()
         start_date, end_date = period_selector(min_date, max_date, key_prefix="short", default="1Y")
 
-    tab_change, tab_trend = st.tabs(["변동", "추이"])
+    with _sticky_tabbar_tall():
+        tab_change, tab_trend = st.tabs(["변동", "추이"])
 
     with tab_change:
         rows = [_rate_change_row(label, group, tenor) for label, group, tenor in SHORT_RATE_ROWS]
@@ -1813,6 +1862,28 @@ def _bss_vs_futures_scatter(start_date, end_date):
     fig.update_layout(title="BSS와 선물 저평", xaxis_title="IRS - KTB 3년 (bp)",
                        yaxis_title="3년 선물 저평(bp)",
                        height=480, showlegend=False, margin=dict(t=40))
+    return fig
+
+
+def _futures_implied_vs_irs_and_cd(start_date, end_date):
+    """선물내재수익률(3Y) - IRS(3Y) 추이(좌축, bp)와 CD(3M) 금리 추이(우축, %)를 한 차트에."""
+    implied_vs_irs = _irs_vs_futures_yield_view("3Y", "선물3년", start_date, end_date).copy()
+    implied_vs_irs["값"] = -implied_vs_irs["값"]  # IRS-선물내재수익률의 부호를 뒤집어 선물내재수익률-IRS로
+    cd = curve_history(df, "CD", "91D")[["날짜", "값"]]
+    cd = cd[(cd["날짜"].dt.date >= start_date) & (cd["날짜"].dt.date <= end_date)]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=implied_vs_irs["날짜"], y=implied_vs_irs["값"], name="선물내재수익률-IRS 3년",
+                              line=dict(color="#C0392B", width=2)))
+    fig.add_trace(go.Scatter(x=cd["날짜"], y=cd["값"], name="CD(3M) (우)",
+                              line=dict(color="#2980B9", width=1.6), yaxis="y2"))
+    fig.add_hline(y=0, line_color="gray", line_width=1)
+    fig.update_layout(
+        title="선물내재수익률-IRS 3년 vs CD금리", height=420,
+        yaxis=dict(title="선물-IRS(bp)"),
+        yaxis2=dict(title="CD(3M, %)", overlaying="y", side="right"),
+        legend=dict(orientation="h", y=-0.2), margin=dict(t=40),
+    )
     return fig
 
 
@@ -1913,7 +1984,8 @@ def page_relative_value():
     with _sticky_header():
         st.title("⚖️ Relative Value")
 
-    tab_valuation, tab_irsktb, tab_irsfut = st.tabs(["Valuation", "IRS-KTB", "IRS-선물"])
+    with _sticky_tabbar_short():
+        tab_valuation, tab_irsktb, tab_irsfut = st.tabs(["Valuation", "IRS-KTB", "IRS-선물"])
 
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
@@ -1927,6 +1999,10 @@ def page_relative_value():
             st.plotly_chart(_bss_vs_futures_scatter(start_date, end_date), use_container_width=True, key="rv_scatter")
         with col2:
             st.image(str(ASSETS_DIR / "trilemma_diagram.png"), use_container_width=True)
+
+        _chart_gap()
+        st.plotly_chart(_futures_implied_vs_irs_and_cd(start_date, end_date), use_container_width=True,
+                         key="rv_implied_vs_cd")
 
         _chart_gap()
         st.plotly_chart(_futures_implied_vs_irs_and_richness(start_date, end_date), use_container_width=True,
