@@ -1701,6 +1701,39 @@ def _short_rate_spread_chart_cached(label, group, tenor, start_date, end_date, _
     return _short_rate_spread_chart(label, group, tenor, start_date, end_date)
 
 
+# CD~선물-IRS 한 차트 비교: 레벨(%)은 좌축, 선물-IRS 스프레드(bp)는 우축
+SHORT_CURVE_OVERLAY_LEVELS = [
+    ("CD(3M)", "CD", "91D", "#2980B9"),
+    ("A1CP(3M)", "ABCP A1", "3M", "#27AE60"),
+    ("A1CP(1Y)", "ABCP A1", "1Y", "#8E44AD"),
+    ("IRS(6M)", "IRS", "6M", "#D68910"),
+    ("IRS(1Y)", "IRS", "1Y", "#7F8C8D"),
+]
+
+
+def _short_curve_overlay_chart(start_date, end_date):
+    """CD/A1CP/IRS(단기) 레벨을 한 차트에 겹치고, 선물내재수익률-IRS 3년 스프레드를 우축에 같이 표시."""
+    fig = go.Figure()
+    for label, group, tenor, color in SHORT_CURVE_OVERLAY_LEVELS:
+        hist = curve_history(df, group, tenor)[["날짜", "값"]]
+        hist = hist[(hist["날짜"].dt.date >= start_date) & (hist["날짜"].dt.date <= end_date)]
+        fig.add_trace(go.Scatter(x=hist["날짜"], y=hist["값"], name=label, line=dict(color=color, width=1.8)))
+
+    spread = _irs_vs_futures_yield_view("3Y", "선물3년", start_date, end_date)
+    fig.add_trace(go.Scatter(x=spread["날짜"], y=-spread["값"], name="선물내재수익률-IRS 3년 (우)",
+                              line=dict(color="#C0392B", width=1.6, dash="dot"), yaxis="y2"))
+
+    fig.update_layout(title="CD~선물-IRS 금리 비교", height=440,
+                       yaxis=dict(title="%"), yaxis2=dict(title="선물-IRS(bp)", overlaying="y", side="right"),
+                       legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def _short_curve_overlay_chart_cached(start_date, end_date, _mtime: float):
+    return _short_curve_overlay_chart(start_date, end_date)
+
+
 def page_short():
     with _sticky_header():
         st.title("📉 단기금리")
@@ -1716,6 +1749,8 @@ def page_short():
 
     with tab_trend:
         mtime = EXCEL_PATH.stat().st_mtime
+        st.plotly_chart(_short_curve_overlay_chart_cached(start_date, end_date, mtime),
+                         use_container_width=True, key="short_curve_overlay")
         for label, group, tenor in SHORT_RATE_TREND_ITEMS:
             cols = st.columns(2)
             with cols[0]:
