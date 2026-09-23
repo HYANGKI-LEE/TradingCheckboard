@@ -1,0 +1,4 @@
+[client]
+# 블라인드 심사 등으로 작성자 정보(GitHub 링크, Fork 버튼, Deploy 메뉴 등)를
+# 노출하면 안 될 때를 위해 툴바를 완전히 숨김.
+toolbarMode = "minimal"
