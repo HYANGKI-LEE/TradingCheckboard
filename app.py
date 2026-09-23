@@ -40,6 +40,12 @@ st.markdown(
     a[data-testid="stSidebarNavLink"] [data-testid="stIconEmoji"] {
         font-size: 1.15rem;
     }
+    /* 블라인드 심사 대응: Streamlit Cloud는 client.toolbarMode=minimal 설정을 무시하고
+       Fork/GitHub 링크/메뉴를 계속 띄워서, CSS로 강제로 숨김(헤더 바 자체는 sticky 위치
+       계산에 쓰이니 높이는 남겨두고 내용만 숨김). */
+    [data-testid="stToolbarActions"], [data-testid="stMainMenu"] {
+        display: none !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
