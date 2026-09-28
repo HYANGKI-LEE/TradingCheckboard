@@ -37,6 +37,11 @@ $MasterPath = Join-Path $RepoDir "data\RawData_master.xlsx"
 $DeployPath = Join-Path $RepoDir "data\RawData.xlsx"
 $CompactScript = Join-Path $RepoDir "scripts\compact_rawdata.py"
 $PythonExe = "C:\Python314\python.exe"
+# 작업 스케줄러가 "로그온 여부와 무관하게 실행"으로 도는 세션에서는 사용자 프로필이
+# 제대로 안 불러와져서 %APPDATA% 기준 pip --user 설치 경로(site-packages)가 sys.path에
+# 안 잡히는 경우가 있음 - openpyxl을 못 찾는 ModuleNotFoundError로 실제로 겪었음.
+# PYTHONPATH를 직접 지정해서 세션 종류와 무관하게 항상 찾도록 방어.
+$env:PYTHONPATH = "C:\Users\infomax\AppData\Roaming\Python\Python314\site-packages"
 $TempCopyPath = Join-Path $env:TEMP "RawData_autoupdate_working.xlsx"
 $LogDir = Join-Path $RepoDir "scripts\logs"
 $LogPath = Join-Path $LogDir "update_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
@@ -205,7 +210,13 @@ if ($LASTEXITCODE -ne 0) {
 $afterSize = (Get-Item $DeployPath).Length
 Write-Log "배포용 RawData.xlsx 재생성 완료 (${beforeSize}B -> ${afterSize}B)"
 
-& git add "data/RawData.xlsx" 2>&1 | ForEach-Object { Write-Log "git: $_" }
+$StaticSiteScript = Join-Path $RepoDir "scripts\generate_static_site.py"
+& $PythonExe $StaticSiteScript 2>&1 | ForEach-Object { Write-Log "staticsite: $_" }
+if ($LASTEXITCODE -ne 0) {
+    Write-Log "WARNING: 정적 사이트(GitHub Pages) 생성 실패(exit $LASTEXITCODE) - RawData.xlsx는 정상 커밋 진행"
+}
+
+& git add "data/RawData.xlsx" "docs" 2>&1 | ForEach-Object { Write-Log "git: $_" }
 $diffCheck = & git diff --cached --stat 2>&1
 if ($diffCheck) {
     & git commit -m "RawData.xlsx 자동 업데이트 ($(Get-Date -Format 'yyyy-MM-dd'))" 2>&1 | ForEach-Object { Write-Log "git: $_" }
