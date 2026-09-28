@@ -13,6 +13,8 @@ Plotly range selector 버튼으로 클라이언트에서 바로 확대/축소하
 import sys
 import json
 import shutil
+import base64
+import struct
 from pathlib import Path
 
 import pandas as pd
@@ -98,6 +100,25 @@ def _finalize(fig):
     return fig
 
 
+_BDATA_DTYPES = {"f8": "d", "f4": "f", "i4": "i", "i2": "h", "u4": "I", "u2": "H", "i1": "b", "u1": "B"}
+
+
+def _decode_bdata(value):
+    """y값을 pandas Series 그대로 넘기면 Plotly가 {'dtype':'f8','bdata':'<base64>'} 같은
+    자체 압축 바이너리 포맷으로 인코딩해버리는 경우가 있다(우리 코드가 다 이 경로를 탐) -
+    이 상태로 그대로 JSON에 내보내면 브라우저 쪽 JS가 평범한 배열로 못 읽어서(기간 버튼
+    누를 때 y축 재계산이 깨짐), 여기서 직접 다시 순수 숫자 리스트로 풀어준다."""
+    if not (isinstance(value, dict) and "bdata" in value and "dtype" in value):
+        return value
+    fmt = _BDATA_DTYPES.get(value["dtype"])
+    if fmt is None:
+        return value  # 모르는 타입이면 안전하게 원본 유지
+    raw_bytes = base64.b64decode(value["bdata"])
+    n = len(raw_bytes) // struct.calcsize(fmt)
+    nums = struct.unpack(f"<{n}{fmt}", raw_bytes)
+    return [None if v != v else v for v in nums]  # NaN -> None (v!=v는 NaN 판별)
+
+
 _chart_counter = [0]
 
 
@@ -107,19 +128,19 @@ def chart_div(fig, timeseries: bool = True) -> str:
     용량을 줄인다(카테고리 축(바 차트 등)은 변환 실패하면 원본 그대로 둠).
     timeseries: 날짜 x축 차트인지 여부 - period-scope의 공통 기간 버튼이 이 값이
     True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐)."""
-    import pandas as pd
     _finalize(fig)
     _chart_counter[0] += 1
     div_id = f"chart{_chart_counter[0]}"
     raw = fig.to_plotly_json()
     for trace in raw["data"]:
         x = trace.get("x")
-        if x is None or len(x) == 0:
-            continue
-        try:
-            trace["x"] = [str(pd.Timestamp(v).date()) for v in x]
-        except (ValueError, TypeError):
-            pass
+        if x is not None and len(x) > 0:
+            try:
+                trace["x"] = [str(pd.Timestamp(v).date()) for v in x]
+            except (ValueError, TypeError):
+                pass
+        if "y" in trace:
+            trace["y"] = _decode_bdata(trace["y"])
     payload = json.dumps({"data": raw["data"], "layout": raw["layout"], "timeseries": timeseries},
                           separators=(",", ":"), default=str)
     ts_attr = "1" if timeseries else "0"
@@ -706,10 +727,14 @@ function rescaleY(gd, start, end) {
   // 기간 버튼으로 x축을 바꿔도 Plotly는 y축을 그대로 두는게 기본 동작이라(전체 데이터
   // 기준으로 고정) 확대할수록 위아래 여백만 늘어남 - 보이는 x범위 안의 값만으로
   // y축(+ 우측 y2축)을 직접 다시 계산해서 꽉 차게 맞춘다.
-  if (!gd || !gd.data) return;
+  // gd.data는 Plotly.js가 렌더링하면서 큰 숫자 배열을 자체 압축 포맷({dtype,bdata})으로
+  // 바꿔치기해버려서 직접 못 읽음 - renderChart에서 따로 저장해둔 원본 배열(gd.__rawData)을 쓴다.
+  if (!gd) return;
+  var data = gd.__rawData || gd.data;
+  if (!data) return;
   var t0 = start.getTime(), t1 = end.getTime();
   var ranges = {};
-  gd.data.forEach(function(trace) {
+  data.forEach(function(trace) {
     if (!trace.x || !trace.y) return;
     var ax = (trace.yaxis === 'y2') ? 'yaxis2' : 'yaxis';
     if (!ranges[ax]) ranges[ax] = [Infinity, -Infinity];
@@ -809,8 +834,13 @@ function showTab(groupId, idx) {
   setTimeout(function(){ resizeCharts(panels[idx]); }, 0);
 }
 function renderChart(id) {
-  var payload = JSON.parse(document.getElementById(id + '-data').textContent);
-  Plotly.newPlot(id, payload.data, payload.layout, {displaylogo:false, responsive:true});
+  var text = document.getElementById(id + '-data').textContent;
+  var gd = document.getElementById(id);
+  // Plotly.newPlot에 넘기는 data는 Plotly.js가 내부적으로 값을 바꿔치기(bdata 압축)할 수
+  // 있어서, rescaleY가 나중에 참조할 원본은 완전히 별개의 복사본으로 따로 파싱해둔다.
+  gd.__rawData = JSON.parse(text).data;
+  var payload = JSON.parse(text);
+  Plotly.newPlot(gd, payload.data, payload.layout, {displaylogo:false, responsive:true});
 }
 document.addEventListener('DOMContentLoaded', function() {
   // 모든 period-scope의 기본 기간을 한 번에 적용(보이지 않는 탭/페이지 것도 포함 -
