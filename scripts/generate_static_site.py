@@ -88,29 +88,12 @@ HIST_START_D = app._preset_to_start("5Y", MIN_D, MAX_D)
 
 
 # ================================================================ 차트/HTML 공용 유틸
-RANGE_SELECTOR = dict(
-    buttons=[
-        dict(count=1, label="1M", step="month", stepmode="backward"),
-        dict(count=3, label="3M", step="month", stepmode="backward"),
-        dict(count=6, label="6M", step="month", stepmode="backward"),
-        dict(count=1, label="1Y", step="year", stepmode="backward"),
-        dict(count=3, label="3Y", step="year", stepmode="backward"),
-        dict(step="year", stepmode="todate", label="YTD"),
-        dict(step="all", label="5Y(전체)"),
-    ],
-    font=dict(size=11),
-)
+# 라이브 앱과 동일한 기간 프리셋. 페이지(또는 탭) 상단에 딱 하나만 두고 그 안의 모든
+# 차트에 한꺼번에 적용한다(차트마다 따로 버튼을 붙이던 이전 방식은 라이브 앱과 달라서 폐기).
+PERIOD_PRESETS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "10Y", "MTD", "QTD", "YTD", "MAX", "설정"]
 
 
 def _finalize(fig):
-    """모든 차트 공통: x축에 기간 선택 버튼을 달고 기본 표시 범위는 최근 1년으로."""
-    fig.update_xaxes(rangeselector=RANGE_SELECTOR, type="date")
-    try:
-        end = MAX_D
-        start = app._preset_to_start("1Y", MIN_D, end)
-        fig.update_xaxes(range=[str(start), str(end)])
-    except Exception:
-        pass
     fig.update_layout(margin=dict(t=60))
     return fig
 
@@ -122,13 +105,10 @@ def chart_div(fig, timeseries: bool = True) -> str:
     """fig.to_html()은 날짜를 마이크로초 단위 ISO 문자열로 통째로 내장해서 차트 하나가
     수백 KB씩 나감 - 직접 JSON을 만들면서 날짜 축만 'YYYY-MM-DD'로 짧게 바꿔서 내장
     용량을 줄인다(카테고리 축(바 차트 등)은 변환 실패하면 원본 그대로 둠).
-    timeseries=False: x축이 날짜가 아닌 차트(히트맵, 만기별 막대그래프 등) - 기간
-    선택 버튼을 강제로 달면 x축이 통째로 깨지므로 _finalize를 건너뛴다."""
+    timeseries: 날짜 x축 차트인지 여부 - period-scope의 공통 기간 버튼이 이 값이
+    True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐)."""
     import pandas as pd
-    if timeseries:
-        _finalize(fig)
-    else:
-        fig.update_layout(margin=dict(t=60))
+    _finalize(fig)
     _chart_counter[0] += 1
     div_id = f"chart{_chart_counter[0]}"
     raw = fig.to_plotly_json()
@@ -140,11 +120,35 @@ def chart_div(fig, timeseries: bool = True) -> str:
             trace["x"] = [str(pd.Timestamp(v).date()) for v in x]
         except (ValueError, TypeError):
             pass
-    payload = json.dumps({"data": raw["data"], "layout": raw["layout"]},
+    payload = json.dumps({"data": raw["data"], "layout": raw["layout"], "timeseries": timeseries},
                           separators=(",", ":"), default=str)
-    return (f'<div id="{div_id}" class="plotly-chart"></div>'
+    ts_attr = "1" if timeseries else "0"
+    return (f'<div id="{div_id}" class="plotly-chart" data-ts="{ts_attr}"></div>'
             f'<script type="application/json" id="{div_id}-data">{payload}</script>'
             f'<script>renderChart("{div_id}");</script>')
+
+
+_scope_counter = [0]
+
+
+def period_scope(default: str, body: str) -> str:
+    """body: 이 스코프로 감쌀 HTML(그 안의 chart_div가 만든 차트들이 이 스코프의
+    기간 버튼 적용 대상이 됨). 라이브 앱에서 기간선택 위젯 하나가 페이지 전체
+    (또는 탭 하나)에 적용되던 것과 동일한 범위 단위."""
+    _scope_counter[0] += 1
+    scope_id = f"scope{_scope_counter[0]}"
+    btns = "".join(
+        f'<button data-preset="{p}" onclick="{"toggleCustom" if p == "설정" else "applyPeriod"}'
+        f'(\'{scope_id}\'{"" if p == "설정" else f",\'{p}\'"},this)">{p}</button>'
+        for p in PERIOD_PRESETS
+    )
+    bar = (f'<div class="period-bar" data-scope="{scope_id}">'
+           f'<span class="period-label">기간</span>{btns}</div>'
+           f'<div class="custom-range" id="{scope_id}-customBox">'
+           f'<input type="date" id="{scope_id}-start"> ~ '
+           f'<input type="date" id="{scope_id}-end"> '
+           f'<button onclick="applyCustomRange(\'{scope_id}\')">적용</button></div>')
+    return f'<div class="period-scope" data-scope="{scope_id}" data-default="{default}">{bar}{body}</div>'
 
 
 def plot_with_ma_fig(view, title, yaxis_title, name, avg_line=None):
@@ -266,7 +270,8 @@ def render_domestic() -> str:
     table = app._render_rate_table(change_sections, highlight={"1Y", "2Y", "3Y"})
     bar_chart = chart_div(app._daily_change_bar_chart(), timeseries=False)
     trend_chart = chart_div(plot_change_multi_fig(app.DOMESTIC_CHANGE_SERIES, "주요금리 변동 추이"))
-    tab_change = section("주요 금리", grid(2, [table, bar_chart])) + section("", trend_chart)
+    tab_change = (section("주요 금리", grid(2, [table, bar_chart])) +
+                  section("", period_scope("YTD", trend_chart)))
 
     rate_cells = []
     for tenor in app.DOMESTIC_RATE_TENORS:
@@ -297,7 +302,8 @@ def render_domestic() -> str:
         futures_sections.append(section(f"{label}국채선물", grid(2, cells)))
     tab_futures = "".join(futures_sections)
 
-    return tabs_html(["변동", "Rates", "스프레드", "선물"], [tab_change, tab_rates, tab_spread, tab_futures])
+    body = tabs_html(["변동", "Rates", "스프레드", "선물"], [tab_change, tab_rates, tab_spread, tab_futures])
+    return period_scope("1Y", body)
 
 
 # ================================================================ 크레딧
@@ -322,7 +328,7 @@ def render_credit() -> str:
                                                             data_suffix, HIST_START_D, MAX_D))
                  for display_grade, data_suffix in available_grades]
         spread_sections.append(section(section_label, grid(3, cells)))
-    tab_spread = "".join(spread_sections)
+    tab_spread = period_scope("1Y", "".join(spread_sections))
 
     heatmap = app._excess_return_heatmap_cached(app.EXCEL_PATH.stat().st_mtime)
     heatmap_html = chart_div(heatmap, timeseries=False) if heatmap is not None \
@@ -345,7 +351,7 @@ def render_credit() -> str:
         '<p class="caption">기대수익률 = Roll-down에 따른 Capital gain + Coupon (보유 6개월 기준). '
         '초과 기대수익률 = 크레딧 기대수익률 - 국고채 기대수익률 (같은 만기끼리 비교)</p>' +
         heatmap_html +
-        section(f"초과 기대수익률 추이 (기본값: {default_label} / {default_tenor}Y)", trend_html)
+        period_scope("1Y", section(f"초과 기대수익률 추이 (기본값: {default_label} / {default_tenor}Y)", trend_html))
     )
 
     tab_rate = '<p class="caption">추가 예정</p>'
@@ -363,7 +369,7 @@ def render_short() -> str:
     for label, group, tenor in app.SHORT_RATE_TREND_ITEMS:
         pair_cells.append(chart_div(app._short_rate_level_chart(label, group, tenor, HIST_START_D, MAX_D)))
         pair_cells.append(chart_div(app._short_rate_spread_chart(label, group, tenor, HIST_START_D, MAX_D)))
-    tab_trend = overlay + grid(2, pair_cells)
+    tab_trend = period_scope("1Y", overlay + grid(2, pair_cells))
 
     return tabs_html(["변동", "추이"], [tab_change, tab_trend])
 
@@ -434,8 +440,9 @@ def render_irs() -> str:
         fly_cells.append(chart_div(plot_with_ma_fig(view, f"IRS 버터플라이 {label}", "bp", label)))
     tab_fly = grid(3, fly_cells)
 
-    return tabs_html(["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"],
+    body = tabs_html(["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"],
                       [tab_change, tab_par, tab_spread, tab_zero, tab_fwd_rate, tab_fly])
+    return period_scope("1Y", body)
 
 
 # ================================================================ Relative Value
@@ -452,7 +459,7 @@ def render_rv() -> str:
     diff_view = diff_view.assign(**app._with_ma(diff_view["값"]))
     bss_minus_abcp = chart_div(plot_with_ma_fig(diff_view, "여전채AA- BSS 2Y - ABCP A1 3개월", "bp",
                                                  "BSS-ABCP", avg_line=avg))
-    tab_valuation = (
+    tab_valuation = period_scope("1Y",
         grid(2, [scatter, image_html]) + implied_vs_cd + implied_vs_richness + ktb_vs_fut +
         grid(2, [bss_abcp, bss_minus_abcp])
     )
@@ -464,7 +471,7 @@ def render_rv() -> str:
         view = app._irs_vs_futures_yield_view(irs_tenor, futures_group, HIST_START_D, MAX_D)
         cells.append(chart_div(plot_with_ma_fig(view, f"IRS-선물내재수익률 {irs_tenor}", "bp",
                                                  f"IRS-선물 {irs_tenor}", avg_line=avg)))
-    tab_irsfut = section("IRS-선물내재수익률", grid(2, cells))
+    tab_irsfut = period_scope("1Y", section("IRS-선물내재수익률", grid(2, cells)))
 
     cells2 = []
     for tenor in app.IRS_KTB_SPREAD_TENORS:
@@ -472,7 +479,7 @@ def render_rv() -> str:
         avg = full_history["값"].mean()
         view = app._cross_group_spread_view("IRS", "국고채", tenor, HIST_START_D, MAX_D)
         cells2.append(chart_div(plot_with_ma_fig(view, f"IRS-KTB {tenor}", "bp", f"IRS-KTB {tenor}", avg_line=avg)))
-    tab_irsktb = grid(3, cells2)
+    tab_irsktb = period_scope("1Y", grid(3, cells2))
 
     return tabs_html(["Valuation", "IRS-KTB", "IRS-선물"], [tab_valuation, tab_irsktb, tab_irsfut])
 
@@ -523,8 +530,9 @@ def render_foreign() -> str:
         country_cells.append(chart_div(plot_with_ma_fig(view, f"{label} (10Y)", "bp", label)))
     tab_spread_country = grid(3, country_cells)
 
-    return tabs_html(["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"],
+    body = tabs_html(["변동", "Rates", "스프레드(기간)", "스프레드(국가간)"],
                       [tab_change, tab_rates, tab_spread_period, tab_spread_country])
+    return period_scope("1Y", body)
 
 
 # ================================================================ FX
@@ -539,7 +547,7 @@ def render_fx() -> str:
             else app._series_history_view(group, HIST_START_D, MAX_D)
         flag = app.FX_FLAGS.get(group, "")
         cells.append(chart_div(plot_with_ma_fig(view, f"{flag} {group}", "환율", f"{flag} {group}")))
-    tab_chart = grid(3, cells)
+    tab_chart = period_scope("1Y", grid(3, cells))
 
     return tabs_html(["변동", "차트"], [tab_change, tab_chart])
 
@@ -572,7 +580,7 @@ def render_commodity() -> str:
                 yaxis_title = "가격"
             cells.append(chart_div(plot_with_ma_fig(view, f"{emoji} {group}", yaxis_title, f"{emoji} {group}")))
         chart_sections.append(section(category, grid(3, cells)))
-    tab_chart = "".join(chart_sections)
+    tab_chart = period_scope("1Y", "".join(chart_sections))
 
     return tabs_html(["변동", "차트"], [tab_change, tab_chart])
 
@@ -602,7 +610,8 @@ def render_stock() -> str:
     fig2.update_layout(title="Yield Gap (1/PER - 국고채 3년)", yaxis_title="%p", height=420, margin=dict(t=40, r=70))
     tab_yieldgap = grid(2, [chart_div(fig1), chart_div(fig2)])
 
-    return tabs_html(["Yield Gap", "주가추이"], [tab_yieldgap, tab_indices])
+    body = tabs_html(["Yield Gap", "주가추이"], [tab_yieldgap, tab_indices])
+    return period_scope("5Y", body)
 
 
 # ================================================================ 전체 조립
@@ -653,6 +662,16 @@ body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
 .plotly-chart { width:100%; }
 .caption, .note { color:var(--muted); font-size:13px; margin:4px 0 10px; }
 table { font-size:14px; }
+.period-bar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin:10px 0 16px;
+              padding-bottom:12px; border-bottom:1px solid var(--border); }
+.period-label { font-size:13px; color:var(--muted); margin-right:6px; }
+.period-bar button { border:1px solid var(--border); background:#fff; border-radius:6px; padding:5px 11px;
+                      font-size:13px; cursor:pointer; color:var(--text); }
+.period-bar button:hover { background:#f2f4f7; }
+.period-bar button.active { background:#fdecea; border-color:#e8a39b; color:#c0392b; font-weight:600; }
+.custom-range { display:none; align-items:center; gap:6px; margin:-8px 0 16px; font-size:13px; }
+.custom-range.show { display:flex; }
+.custom-range input { border:1px solid var(--border); border-radius:6px; padding:4px 6px; font-size:13px; }
 @media (max-width: 900px) {
   #sidebar { position:fixed; left:-240px; transition:left .2s; z-index:20; box-shadow:2px 0 8px rgba(0,0,0,.1); }
   #sidebar.open { left:0; }
@@ -662,6 +681,106 @@ table { font-size:14px; }
 """
 
 JS = """
+var CHART_MIN_DATE = new Date("__HIST_START__");
+var CHART_MAX_DATE = new Date("__MAX_D__");
+
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function isoDate(d) { return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()); }
+
+function presetRange(preset) {
+  var end = CHART_MAX_DATE, start;
+  if (preset === 'MTD') start = new Date(end.getFullYear(), end.getMonth(), 1);
+  else if (preset === 'QTD') { var q = Math.floor(end.getMonth()/3)*3; start = new Date(end.getFullYear(), q, 1); }
+  else if (preset === 'YTD') start = new Date(end.getFullYear(), 0, 1);
+  else if (preset === 'MAX') start = CHART_MIN_DATE;
+  else {
+    var n = parseInt(preset, 10), unit = preset.slice(-1);
+    start = new Date(end.getTime());
+    if (unit === 'M') start.setMonth(start.getMonth() - n); else start.setFullYear(start.getFullYear() - n);
+  }
+  if (start < CHART_MIN_DATE) start = CHART_MIN_DATE;
+  return [start, end];
+}
+
+function rescaleY(gd, start, end) {
+  // 기간 버튼으로 x축을 바꿔도 Plotly는 y축을 그대로 두는게 기본 동작이라(전체 데이터
+  // 기준으로 고정) 확대할수록 위아래 여백만 늘어남 - 보이는 x범위 안의 값만으로
+  // y축(+ 우측 y2축)을 직접 다시 계산해서 꽉 차게 맞춘다.
+  if (!gd || !gd.data) return;
+  var t0 = start.getTime(), t1 = end.getTime();
+  var ranges = {};
+  gd.data.forEach(function(trace) {
+    if (!trace.x || !trace.y) return;
+    var ax = (trace.yaxis === 'y2') ? 'yaxis2' : 'yaxis';
+    if (!ranges[ax]) ranges[ax] = [Infinity, -Infinity];
+    for (var i = 0; i < trace.x.length; i++) {
+      var xv = new Date(trace.x[i]).getTime();
+      if (xv >= t0 && xv <= t1) {
+        var yv = trace.y[i];
+        if (typeof yv === 'number' && !isNaN(yv)) {
+          if (yv < ranges[ax][0]) ranges[ax][0] = yv;
+          if (yv > ranges[ax][1]) ranges[ax][1] = yv;
+        }
+      }
+    }
+  });
+  var upd = {'xaxis.range': [isoDate(start), isoDate(end)], 'xaxis.autorange': false};
+  Object.keys(ranges).forEach(function(ax) {
+    var mn = ranges[ax][0], mx = ranges[ax][1];
+    if (mn === Infinity) return;
+    var pad = (mx - mn) * 0.08;
+    if (!pad) pad = (Math.abs(mx) || 1) * 0.08;
+    upd[ax + '.range'] = [mn - pad, mx + pad];
+    upd[ax + '.autorange'] = false;
+  });
+  Plotly.relayout(gd, upd);
+}
+
+function scopeCharts(scopeId) {
+  // 스코프 안에 또 다른 period-scope가 중첩된 경우(페이지 공용 기간선택 + 탭 안의
+  // 별도 기간선택이 같이 있는 경우), 중첩된 안쪽 스코프 소속 차트는 제외해야
+  // 바깥 스코프 버튼을 눌렀을 때 안쪽 차트까지 같이 안 움직인다.
+  var scope = document.querySelector('.period-scope[data-scope="' + scopeId + '"]');
+  if (!scope) return [];
+  return Array.prototype.slice.call(scope.querySelectorAll('.plotly-chart[data-ts="1"]'))
+    .filter(function(el){ return el.closest('.period-scope') === scope; });
+}
+
+function applyPeriod(scopeId, preset, btn) {
+  var r = presetRange(preset);
+  scopeCharts(scopeId).forEach(function(el){ if (el.data) rescaleY(el, r[0], r[1]); });
+  var bar = document.querySelector('.period-bar[data-scope="' + scopeId + '"]');
+  bar.querySelectorAll('button').forEach(function(b){ b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  var box = document.getElementById(scopeId + '-customBox');
+  if (box) box.classList.remove('show');
+}
+
+function toggleCustom(scopeId, btn) {
+  var box = document.getElementById(scopeId + '-customBox');
+  box.classList.toggle('show');
+  var bar = document.querySelector('.period-bar[data-scope="' + scopeId + '"]');
+  bar.querySelectorAll('button').forEach(function(b){ b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+}
+
+function applyCustomRange(scopeId) {
+  var s = document.getElementById(scopeId + '-start').value;
+  var e = document.getElementById(scopeId + '-end').value;
+  if (!s || !e) return;
+  var start = new Date(s), end = new Date(e);
+  scopeCharts(scopeId).forEach(function(el){ if (el.data) rescaleY(el, start, end); });
+}
+
+function initScopes() {
+  document.querySelectorAll('.period-scope').forEach(function(scope) {
+    var scopeId = scope.getAttribute('data-scope');
+    var def = scope.getAttribute('data-default') || '1Y';
+    var btn = scope.querySelector('.period-bar button[data-preset="' + def + '"]');
+    applyPeriod(scopeId, def, btn);
+  });
+}
+
 function resizeCharts(root) {
   root.querySelectorAll('.plotly-chart').forEach(function(el){
     if (window.Plotly && el.data) window.Plotly.Plots.resize(el);
@@ -694,6 +813,9 @@ function renderChart(id) {
   Plotly.newPlot(id, payload.data, payload.layout, {displaylogo:false, responsive:true});
 }
 document.addEventListener('DOMContentLoaded', function() {
+  // 모든 period-scope의 기본 기간을 한 번에 적용(보이지 않는 탭/페이지 것도 포함 -
+  // Plotly relayout은 숨겨진 요소에도 정상 반영되고, 실제로 보일 때 resize만 해주면 됨).
+  setTimeout(initScopes, 50);
   var hash = location.hash.replace('#', '');
   var valid = document.getElementById('page-' + hash);
   showPage(valid ? hash : 'main');
@@ -718,6 +840,7 @@ def build() -> str:
             f'</div>'
         )
     generated_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    js = JS.replace("__HIST_START__", str(HIST_START_D)).replace("__MAX_D__", str(MAX_D))
     return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -725,7 +848,7 @@ def build() -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>채권/IRS 트레이딩 대시보드</title>
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2/plotly.min.js"></script>
-<script>{JS}</script>
+<script>{js}</script>
 <style>{CSS}</style>
 </head>
 <body>
