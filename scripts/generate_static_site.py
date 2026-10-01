@@ -17,6 +17,14 @@ import base64
 import struct
 from pathlib import Path
 
+# Windows 작업 스케줄러의 "로그온 여부와 무관하게 실행" 세션에서는 사용자 프로필이
+# 제대로 안 불러와져서 %APPDATA% 기준 pip --user 설치 경로가 sys.path에 안 잡히는
+# 경우가 실제로 있었음(PYTHONPATH 환경변수 설정만으로는 재발 - 자식 프로세스까지
+# 안정적으로 안 넘어가는 듯) - 코드에서 직접 못박아서 그 문제를 원천 차단한다.
+_USER_SITE_PACKAGES = r"C:\Users\infomax\AppData\Roaming\Python\Python314\site-packages"
+if _USER_SITE_PACKAGES not in sys.path:
+    sys.path.insert(0, _USER_SITE_PACKAGES)
+
 import pandas as pd
 import plotly.graph_objects as go
 
