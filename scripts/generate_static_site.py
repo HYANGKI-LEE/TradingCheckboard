@@ -10,6 +10,7 @@ Plotly range selector 버튼으로 클라이언트에서 바로 확대/축소하
 드롭다운으로 조합을 고르는 위젯(크레딧 종류/테너, IRS 커스텀 스프레드 등)은 기본값만
 정적으로 보여준다 - 모든 조합을 다 만들면 범위가 너무 커져서 이번 범위에서는 제외.
 """
+import os
 import sys
 import json
 import shutil
@@ -21,7 +22,7 @@ from pathlib import Path
 # 제대로 안 불러와져서 %APPDATA% 기준 pip --user 설치 경로가 sys.path에 안 잡히는
 # 경우가 실제로 있었음(PYTHONPATH 환경변수 설정만으로는 재발 - 자식 프로세스까지
 # 안정적으로 안 넘어가는 듯) - 코드에서 직접 못박아서 그 문제를 원천 차단한다.
-_USER_SITE_PACKAGES = r"C:\Users\infomax\AppData\Roaming\Python\Python314\site-packages"
+_USER_SITE_PACKAGES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
 if _USER_SITE_PACKAGES not in sys.path:
     sys.path.insert(0, _USER_SITE_PACKAGES)
 

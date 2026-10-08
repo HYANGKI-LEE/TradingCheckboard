@@ -41,7 +41,7 @@ $PythonExe = "C:\Python314\python.exe"
 # 제대로 안 불러와져서 %APPDATA% 기준 pip --user 설치 경로(site-packages)가 sys.path에
 # 안 잡히는 경우가 있음 - openpyxl을 못 찾는 ModuleNotFoundError로 실제로 겪었음.
 # PYTHONPATH를 직접 지정해서 세션 종류와 무관하게 항상 찾도록 방어.
-$env:PYTHONPATH = "C:\Users\infomax\AppData\Roaming\Python\Python314\site-packages"
+$env:PYTHONPATH = Join-Path $PSScriptRoot "vendor"
 $TempCopyPath = Join-Path $env:TEMP "RawData_autoupdate_working.xlsx"
 $LogDir = Join-Path $RepoDir "scripts\logs"
 $LogPath = Join-Path $LogDir "update_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
@@ -167,7 +167,9 @@ try {
             $before = $beforeDates[$ws.Name]
             $changed = "동일"
             if ($after -ne $before) { $changed = "변경됨" }
-            Write-Log "  [$($ws.Name)] before=$before after=$after ($changed)"
+            $failCnt = "?"
+            try { $failCnt = $excel.WorksheetFunction.CountIf($ws.Rows(4), "조회요청실패") } catch {}
+            Write-Log "  [$($ws.Name)] before=$before after=$after ($changed) 조회요청실패=$failCnt"
         } catch {}
     }
 

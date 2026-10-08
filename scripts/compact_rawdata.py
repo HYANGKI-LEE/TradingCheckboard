@@ -9,13 +9,14 @@ RawData_master.xlsx는 Infomax IMDH 수식이 들어있는 파일이라 Excel(CO
 read_only/write_only 스트리밍 모드를 써서 대용량 파일도 메모리 적게 쓰고 빠르게 처리한다.
 """
 
+import os
 import sys
 
 # Windows 작업 스케줄러의 "로그온 여부와 무관하게 실행" 세션에서는 사용자 프로필이
 # 제대로 안 불러와져서 %APPDATA% 기준 pip --user 설치 경로가 sys.path에 안 잡히는
 # 경우가 실제로 있었음(PYTHONPATH 환경변수 설정만으로는 재발 - 자식 프로세스까지
 # 안정적으로 안 넘어가는 듯) - 코드에서 직접 못박아서 그 문제를 원천 차단한다.
-_USER_SITE_PACKAGES = r"C:\Users\infomax\AppData\Roaming\Python\Python314\site-packages"
+_USER_SITE_PACKAGES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
 if _USER_SITE_PACKAGES not in sys.path:
     sys.path.insert(0, _USER_SITE_PACKAGES)
 

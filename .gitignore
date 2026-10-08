@@ -6,3 +6,4 @@ __pycache__/
 ~$*.xlsx
 scripts/logs/
 data/RawData_master.xlsx
+scripts/vendor/
