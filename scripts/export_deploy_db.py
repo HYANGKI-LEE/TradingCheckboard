@@ -11,6 +11,7 @@
 """
 
 import argparse
+import datetime as dt
 import os
 import shutil
 import sqlite3
@@ -63,6 +64,7 @@ def build_recent(cutoff):
     n, last = con.execute("SELECT COUNT(*), MAX(date) FROM market").fetchone()
     con.execute("INSERT INTO meta VALUES ('history_cutoff', ?)", (cutoff,))
     con.execute("INSERT INTO meta VALUES ('rows', ?)", (str(n),))
+    con.execute("INSERT INTO meta VALUES ('exported_at', ?)", (dt.datetime.now().isoformat(timespec='seconds'),))
     con.commit()
     con.execute("DETACH DATABASE src")
     con.execute("VACUUM")
