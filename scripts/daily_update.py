@@ -3,8 +3,9 @@
   1. RawData_master.xlsx 업데이트: 인포맥스 IMDH 재조회(refresh_master.ps1) 후
      "전 영업일 날짜"가 시트별로 채워졌는지 확인 -> 통과해야 마스터를 교체
   2. market.db 업데이트: 마스터의 값을 DB에 반영 (엑셀 값이 있는 칸만 덮어쓰고 없는 날짜는 추가)
-  3. 배포: market_recent.db(기준일 이후분, 수 MB 이하)를 다시 만들어 GitHub 에 푸시 -> Streamlit Cloud 자동 재배포
-     (과거분 market_history.db 는 거의 안 바뀌어서 매일 올리지 않음. 푸시 실패는 경고만 하고 업데이트 자체는 성공 처리)
+  3. 배포: market_recent.db(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(docs/index.html)도
+     DB 기준으로 다시 생성해서 GitHub 에 푸시 -> Streamlit Cloud 재배포 + Pages 갱신
+     (과거분 market_history.db 는 거의 안 바뀌어서 매일 올리지 않음. 배포 실패는 경고만 하고 업데이트 자체는 성공 처리)
 
 실패(인포맥스 미로그인, 재조회 실패, 전 영업일 데이터 미반영)하면 --retry-minutes 간격으로
 --max-attempts 번까지 다시 시도하고, 끝까지 안 되면 exit 1 (마스터/DB는 건드리지 않음).
@@ -13,6 +14,7 @@
   --force       주말에도 실행
   --skip-excel  엑셀 재조회 없이 현재 마스터로 확인 + DB 업데이트만 (수동 갱신 후 사용)
   --no-push     GitHub 푸시 생략 (로컬 DB 업데이트만)
+  --no-static   정적 사이트(docs/index.html) 재생성 생략
 """
 
 import argparse
@@ -177,16 +179,32 @@ def _git(*cmd):
     return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace").strip()
 
 
-def publish(today):
+def build_static_site():
+    script = os.path.join(_HERE, "generate_static_site.py")
+    p = subprocess.run([sys.executable, "-X", "utf8", "-W", "ignore", script], capture_output=True, cwd=REPO)
+    out = (p.stdout + p.stderr).decode("utf-8", errors="replace").strip().splitlines()
+    done = [l for l in out if l.startswith("완료")]
+    if p.returncode != 0 or not done:
+        raise RuntimeError("정적 사이트 생성 실패: " + " | ".join(out[-3:])[:300])
+    log("  [배포] 정적 사이트 생성 " + done[-1].split("\\")[-1])
+
+
+def publish(today, with_static=True):
     info = X.export()
     log(f"  [배포] market_recent.db: {info['recent_rows']}일(기준일 {info['history_cutoff']} 이후), 최신 {info['recent_last']}, {info['recent_mb']}MB")
-    rel = "data/market_recent.db"
-    _git("add", rel)
-    rc, out = _git("status", "--porcelain", "--", rel)
+    files = ["data/market_recent.db"]
+    if with_static:
+        try:
+            build_static_site()
+            files.append("docs/index.html")
+        except Exception as e:  # noqa: BLE001 - 정적 사이트 실패해도 recent DB 배포는 계속
+            log(f"WARNING: {e}")
+    _git("add", *files)
+    rc, out = _git("status", "--porcelain", "--", *files)
     if not out.strip():
         log("  [배포] 변경사항 없음 - 커밋/푸시 생략")
         return
-    rc, out = _git("commit", "-m", f"데이터 업데이트 ({today})", "--", rel)
+    rc, out = _git("commit", "-m", f"데이터 업데이트 ({today})", "--", *files)
     log(f"  [git] commit rc={rc}")
     if rc != 0:
         raise RuntimeError("git commit 실패: " + out[:200])
@@ -229,7 +247,7 @@ def attempt(args, today, expected):
     update_db(master_for_db, expected)
     if not args.no_push:
         try:
-            publish(today)
+            publish(today, with_static=not args.no_static)
         except Exception as e:  # noqa: BLE001 - 배포 실패가 데이터 업데이트 성공을 뒤집지 않게
             log(f"WARNING: 배포 단계 실패 (로컬 DB는 정상 업데이트됨): {type(e).__name__}: {e}")
     return True
@@ -240,6 +258,7 @@ def main():
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--skip-excel", action="store_true")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--no-static", action="store_true")
     ap.add_argument("--max-attempts", type=int, default=4)
     ap.add_argument("--retry-minutes", type=int, default=30)
     args = ap.parse_args()
