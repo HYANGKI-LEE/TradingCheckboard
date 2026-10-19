@@ -179,9 +179,26 @@ def _git(*cmd):
     return p.returncode, (p.stdout + p.stderr).decode("utf-8", errors="replace").strip()
 
 
+def _user_site_packages():
+    """작업 스케줄러 세션에서는 파이썬이 사용자 site-packages(streamlit 등이 설치된 곳)를 못 찾는 경우가 있어 경로를 직접 계산한다."""
+    import site
+    cands = []
+    try:
+        cands.append(site.getusersitepackages())
+    except Exception:  # noqa: BLE001
+        pass
+    ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
+    cands.append(os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Python", ver, "site-packages"))
+    return next((c for c in cands if c and os.path.isdir(c)), None)
+
+
 def build_static_site():
     script = os.path.join(_HERE, "generate_static_site.py")
-    p = subprocess.run([sys.executable, "-X", "utf8", "-W", "ignore", script], capture_output=True, cwd=REPO)
+    env = dict(os.environ)
+    us = _user_site_packages()
+    if us:
+        env["PYTHONPATH"] = us + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    p = subprocess.run([sys.executable, "-X", "utf8", "-W", "ignore", script], capture_output=True, cwd=REPO, env=env)
     out = (p.stdout + p.stderr).decode("utf-8", errors="replace").strip().splitlines()
     done = [l for l in out if l.startswith("완료")]
     if p.returncode != 0 or not done:
