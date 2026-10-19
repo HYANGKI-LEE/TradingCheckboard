@@ -190,6 +190,19 @@ def chart_div(fig, timeseries: bool = True) -> str:
             f'<script>renderChart("{div_id}");</script>')
 
 
+def scatter_chart_div(fig, merged) -> str:
+    """기간 버튼에 반응하는 산점도: 전체 히스토리 점(날짜/x/y)을 같이 내장하고, 브라우저(JS)에서 선택 기간의 점만
+    다시 그려 회귀선/현재(마지막 점)를 새로 계산한다. fig 는 JS 가 돌기 전 첫 화면용."""
+    html = chart_div(fig, timeseries=False)
+    div_id = f"chart{_chart_counter[0]}"
+    html = html.replace(f'id="{div_id}" class="plotly-chart" data-ts="0"',
+                        f'id="{div_id}" class="plotly-chart" data-ts="0" data-scatter="1"', 1)
+    pts = {"d": [str(v.date()) for v in merged["날짜"]],
+           "x": [round(float(v), 4) for v in merged["x"]],
+           "y": [round(float(v), 4) for v in merged["y"]]}
+    return html + f'<script type="application/json" id="{div_id}-pts">{json.dumps(pts, separators=(",", ":"))}</script>'
+
+
 _scope_counter = [0]
 
 
@@ -509,7 +522,8 @@ def render_irs() -> str:
 
 # ================================================================ Relative Value
 def render_rv() -> str:
-    scatter = chart_div(app._bss_vs_futures_scatter(HIST_START_D, MAX_D), timeseries=False)
+    scatter_default_start = app._preset_to_start("1Y", MIN_D, MAX_D)
+    scatter = scatter_chart_div(app._bss_vs_futures_scatter(scatter_default_start, MAX_D), app._bss_vs_futures_data())
     image_html = '<img src="assets/trilemma_diagram.png" style="width:100%;height:auto;">'
     implied_vs_cd = chart_div(app._futures_implied_vs_irs_and_cd(HIST_START_D, MAX_D))
     implied_vs_richness = chart_div(app._futures_implied_vs_irs_and_richness(HIST_START_D, MAX_D))
@@ -818,13 +832,57 @@ function scopeCharts(scopeId) {
   // 바깥 스코프 버튼을 눌렀을 때 안쪽 차트까지 같이 안 움직인다.
   var scope = document.querySelector('.period-scope[data-scope="' + scopeId + '"]');
   if (!scope) return [];
-  return Array.prototype.slice.call(scope.querySelectorAll('.plotly-chart[data-ts="1"]'))
+  return Array.prototype.slice.call(scope.querySelectorAll('.plotly-chart[data-ts="1"], .plotly-chart[data-scatter="1"]'))
     .filter(function(el){ return el.closest('.period-scope') === scope; });
+}
+
+function applyRange(el, start, end) {
+  if (el.getAttribute('data-scatter') === '1') renderScatter(el, start, end);
+  else if (el.data) rescaleY(el, start, end);
+}
+
+function renderScatter(el, start, end) {
+  // 산점도: 선택 기간의 점만 다시 그리고(회색), 회귀선(최소제곱)과 마지막 점(빨간 삼각형, 현재)을 새로 계산
+  var P = el.__pts;
+  if (!P) P = el.__pts = JSON.parse(document.getElementById(el.id + '-pts').textContent);
+  var t0 = start.getTime(), t1 = end.getTime();
+  var xs = [], ys = [], ds = [];
+  for (var i = 0; i < P.d.length; i++) {
+    var t = new Date(P.d[i]).getTime();
+    if (t >= t0 && t <= t1) { xs.push(P.x[i]); ys.push(P.y[i]); ds.push(P.d[i]); }
+  }
+  var n = xs.length;
+  if (n === 0) return;
+  var traces = [];
+  if (n >= 2) {
+    var mx = 0, my = 0, k;
+    for (k = 0; k < n; k++) { mx += xs[k]; my += ys[k]; }
+    mx /= n; my /= n;
+    var sxx = 0, sxy = 0, xmin = Infinity, xmax = -Infinity;
+    for (k = 0; k < n; k++) {
+      sxx += (xs[k]-mx)*(xs[k]-mx); sxy += (xs[k]-mx)*(ys[k]-my);
+      if (xs[k] < xmin) xmin = xs[k];
+      if (xs[k] > xmax) xmax = xs[k];
+    }
+    if (sxx > 0) {
+      var slope = sxy / sxx, icpt = my - slope * mx;
+      traces.push({type: 'scatter', mode: 'lines', x: [xmin, xmax], y: [slope*xmin+icpt, slope*xmax+icpt],
+                   line: {color: '#2980B9', width: 2}, name: '회귀선', hoverinfo: 'skip'});
+    }
+  }
+  traces.push({type: 'scatter', mode: 'markers', x: xs.slice(0, n-1), y: ys.slice(0, n-1),
+               marker: {color: 'gray', size: 8, opacity: 0.35, line: {width: 0}}, name: '일별',
+               hovertext: ds.slice(0, n-1)});
+  traces.push({type: 'scatter', mode: 'markers', x: [xs[n-1]], y: [ys[n-1]],
+               marker: {color: 'red', size: 14, symbol: 'triangle-up', line: {width: 1, color: 'black'}},
+               name: '현재 (' + ds[n-1] + ')'});
+  var layout = JSON.parse(document.getElementById(el.id + '-data').textContent).layout;
+  Plotly.react(el, traces, layout, {displaylogo: false, responsive: true});
 }
 
 function applyPeriod(scopeId, preset, btn) {
   var r = presetRange(preset);
-  scopeCharts(scopeId).forEach(function(el){ if (el.data) rescaleY(el, r[0], r[1]); });
+  scopeCharts(scopeId).forEach(function(el){ applyRange(el, r[0], r[1]); });
   var bar = document.querySelector('.period-bar[data-scope="' + scopeId + '"]');
   bar.querySelectorAll('button').forEach(function(b){ b.classList.remove('active'); });
   if (btn) btn.classList.add('active');
@@ -845,7 +903,7 @@ function applyCustomRange(scopeId) {
   var e = document.getElementById(scopeId + '-end').value;
   if (!s || !e) return;
   var start = new Date(s), end = new Date(e);
-  scopeCharts(scopeId).forEach(function(el){ if (el.data) rescaleY(el, start, end); });
+  scopeCharts(scopeId).forEach(function(el){ applyRange(el, start, end); });
 }
 
 function initScopes() {

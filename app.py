@@ -1837,11 +1837,16 @@ def _irs_vs_futures_yield_view(irs_tenor: str, futures_group: str, start_date, e
     return merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
 
-def _bss_vs_futures_scatter(start_date, end_date):
+def _bss_vs_futures_data() -> pd.DataFrame:
+    """BSS(IRS-KTB 3Y, bp)와 3년선물 저평(bp)을 날짜별로 맞춘 전체 히스토리 [날짜, x, y]."""
     bss = credit_spread(df, "IRS", "국고채")
     bss3 = bss[bss["만기"] == "3Y"][["날짜", "스프레드_bp"]].rename(columns={"스프레드_bp": "x"})
     fut3 = _futures_richness_bp("선물3년").rename(columns={"값": "y"})
-    merged = bss3.merge(fut3, on="날짜", how="inner").sort_values("날짜")
+    return bss3.merge(fut3, on="날짜", how="inner").sort_values("날짜")
+
+
+def _bss_vs_futures_scatter(start_date, end_date):
+    merged = _bss_vs_futures_data()
 
     view = merged[(merged["날짜"].dt.date >= start_date) & (merged["날짜"].dt.date <= end_date)]
 
