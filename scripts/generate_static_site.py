@@ -278,7 +278,7 @@ def render_main() -> str:
     sections = [("금리", rate_rows), ("크레딧", credit_rows)]
     table1 = app._render_rate_table(sections, highlight=set(), change_label="변동(bp, Tick)")
 
-    table2 = app._render_spread_matrix_table(app._main_spread_sections_cached(app.EXCEL_PATH.stat().st_mtime))
+    table2 = app._render_spread_matrix_table(app._main_spread_sections_cached(app.data_version()))
 
     body = (
         section("주요 금리 : 변동", table1) +
@@ -360,7 +360,7 @@ def render_credit() -> str:
         spread_sections.append(section(section_label, grid(3, cells)))
     tab_spread = period_scope("1Y", "".join(spread_sections))
 
-    heatmap = app._excess_return_heatmap_cached(app.EXCEL_PATH.stat().st_mtime)
+    heatmap = app._excess_return_heatmap_cached(app.data_version())
     heatmap_html = chart_div(heatmap, timeseries=False) if heatmap is not None \
         else '<p class="caption">계산에 필요한 데이터가 부족합니다.</p>'
     excess_items = [
@@ -370,7 +370,7 @@ def render_credit() -> str:
     ]
     default_label, default_group = excess_items[0]
     default_tenor = app.EXCESS_RETURN_TENORS[4]  # 3Y, 라이브 앱 기본 선택과 동일
-    series = app._excess_return_series_cached(default_group, default_tenor, app.EXCEL_PATH.stat().st_mtime)
+    series = app._excess_return_series_cached(default_group, default_tenor, app.data_version())
     series = series[(series["날짜"].dt.date >= HIST_START_D) & (series["날짜"].dt.date <= MAX_D)]
     trend_html = "<p class='caption'>선택한 조합의 데이터가 없습니다.</p>"
     if not series.empty:

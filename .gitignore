@@ -5,5 +5,9 @@ __pycache__/
 !.streamlit/config.toml
 ~$*.xlsx
 scripts/logs/
-data/RawData_master.xlsx
+data/RawData_master*.xlsx
+data/market.db
+data/market.db.bak
+data/market.db.tmp
+data/market_recent.db.tmp
 scripts/vendor/

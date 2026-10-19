@@ -9,7 +9,7 @@ from data_loader import (
     FOREIGN_COUNTRIES_ORDER,
     COMMODITY_ORDER,
     IRS_ZERO_FWD_TENOR_ORDER,
-    EXCEL_PATH,
+    data_version,
     load_raw_data,
     curve_history,
     credit_spread,
@@ -113,7 +113,7 @@ df, is_sample = load_raw_data()
 if is_sample:
     st.title("📈 채권/IRS 트레이딩 대시보드")
     st.warning(
-        "`data/RawData.xlsx` 파일을 찾을 수 없습니다. 인포맥스 RawData 파일을 `data/RawData.xlsx` 로 넣어주세요.",
+        "`data/market.db`(또는 `market_history.db` + `market_recent.db`) 파일을 찾을 수 없습니다.",
         icon="⚠️",
     )
     st.stop()
@@ -484,7 +484,7 @@ def _render_spread_matrix_table(sections: list) -> str:
 
 
 @st.cache_data(show_spinner="주요 스프레드 계산 중...")
-def _main_spread_sections_cached(_mtime: float) -> list:
+def _main_spread_sections_cached(data_ver: float) -> list:
     short_rows = [_spread_matrix_row("CD(3M)-기준금리", _vs_base_rate_hist("CD", "91D")),
                   _spread_matrix_row("A1CP(3M)-기준금리", _vs_base_rate_hist("ABCP A1", "3M"))]
     govt_rows = [_spread_matrix_row(f"국고 {lg}-{sh}", _tenor_spread_view("국고채", lg, sh, df["날짜"].min().date(),
@@ -526,7 +526,7 @@ def page_main():
         st.markdown("#### 주요 스프레드 : 변동")
         st.caption("CD/CP는 통안 단기물 데이터가 없어 기준금리 대비로 대체했습니다. "
                    "A1CP(6M)/A20CP(6M), 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.")
-        st.markdown(_render_spread_matrix_table(_main_spread_sections_cached(EXCEL_PATH.stat().st_mtime)),
+        st.markdown(_render_spread_matrix_table(_main_spread_sections_cached(data_version())),
                     unsafe_allow_html=True)
 
 
@@ -853,7 +853,7 @@ def _excess_return_heatmap():
 
 
 @st.cache_data(show_spinner="초과 기대수익률 계산 중...")
-def _excess_return_heatmap_cached(_mtime: float):
+def _excess_return_heatmap_cached(data_ver: float):
     """등급 34개 x 만기 7개 조합을 매번 다시 계산하면 느려서 파일이 안 바뀌는 한 캐싱."""
     return _excess_return_heatmap()
 
@@ -907,7 +907,7 @@ def _excess_return_series(credit_group: str, tenor_years: float) -> pd.DataFrame
 
 
 @st.cache_data(show_spinner="초과 기대수익률 추이 계산 중...")
-def _excess_return_series_cached(credit_group: str, tenor_years: float, _mtime: float) -> pd.DataFrame:
+def _excess_return_series_cached(credit_group: str, tenor_years: float, data_ver: float) -> pd.DataFrame:
     return _excess_return_series(credit_group, tenor_years)
 
 
@@ -955,7 +955,7 @@ def page_credit_detail():
     with tab_excess:
         st.caption("기대수익률 = Roll-down에 따른 Capital gain + Coupon (보유 6개월 기준). "
                    "초과 기대수익률 = 크레딧 기대수익률 - 국고채 기대수익률 (같은 만기끼리 비교)")
-        heatmap = _excess_return_heatmap_cached(EXCEL_PATH.stat().st_mtime)
+        heatmap = _excess_return_heatmap_cached(data_version())
         if heatmap is not None:
             st.plotly_chart(heatmap, use_container_width=True, key="credit_excess_return_heatmap")
         else:
@@ -978,7 +978,7 @@ def page_credit_detail():
         selected_tenor = float(tenor_label.rstrip("Y"))
 
         series_start, series_end = period_selector(min_date, max_date, key_prefix="excess_series", default="1Y")
-        series = _excess_return_series_cached(selected_group, selected_tenor, EXCEL_PATH.stat().st_mtime)
+        series = _excess_return_series_cached(selected_group, selected_tenor, data_version())
         series = series[(series["날짜"].dt.date >= series_start) & (series["날짜"].dt.date <= series_end)]
         if series.empty:
             st.info("선택한 조합의 데이터가 없습니다.")
@@ -1746,12 +1746,12 @@ def _short_rate_spread_chart(label: str, group: str, tenor: str | None, start_da
 
 
 @st.cache_data(show_spinner=False)
-def _short_rate_level_chart_cached(label, group, tenor, start_date, end_date, _mtime: float):
+def _short_rate_level_chart_cached(label, group, tenor, start_date, end_date, data_ver: float):
     return _short_rate_level_chart(label, group, tenor, start_date, end_date)
 
 
 @st.cache_data(show_spinner=False)
-def _short_rate_spread_chart_cached(label, group, tenor, start_date, end_date, _mtime: float):
+def _short_rate_spread_chart_cached(label, group, tenor, start_date, end_date, data_ver: float):
     return _short_rate_spread_chart(label, group, tenor, start_date, end_date)
 
 
@@ -1784,7 +1784,7 @@ def _short_curve_overlay_chart(start_date, end_date):
 
 
 @st.cache_data(show_spinner=False)
-def _short_curve_overlay_chart_cached(start_date, end_date, _mtime: float):
+def _short_curve_overlay_chart_cached(start_date, end_date, data_ver: float):
     return _short_curve_overlay_chart(start_date, end_date)
 
 
@@ -1803,7 +1803,7 @@ def page_short():
         st.markdown(_render_rate_table([("단기금리", rows)], highlight=set()), unsafe_allow_html=True)
 
     with tab_trend:
-        mtime = EXCEL_PATH.stat().st_mtime
+        mtime = data_version()
         st.plotly_chart(_short_curve_overlay_chart_cached(start_date, end_date, mtime),
                          use_container_width=True, key="short_curve_overlay")
         for label, group, tenor in SHORT_RATE_TREND_ITEMS:

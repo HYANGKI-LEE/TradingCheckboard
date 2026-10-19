@@ -1,41 +1,37 @@
 """
-인포맥스 RawData.xlsx 파서.
+인포맥스 일별 시세 SQLite DB(data/market.db) 로더.
 
-data/RawData.xlsx 는 인포맥스 IMDH 함수로 뽑은 일별 히스토리 원본이다.
-시트 구조 (고정 레이아웃, 매일 인포맥스가 값만 새로 채워넣는 방식):
+market.db 는 인포맥스 IMDH 엑셀(RawData_master.xlsx)을 매일 scripts/daily_update.py 가 읽어서
+채운 통합 와이드 테이블이다.
 
-  Info(일):
-    row2 = 블록 제목 (블록의 첫 컬럼에만 값, IMDH 수식)
-    row3 = 블록 내 서브헤더 (만기 라벨 등)
-    row4~ = A열 날짜, 나머지 컬럼은 값 (최근 날짜가 위, 아래로 갈수록 과거)
-    블록들: 국고채권/통안증권/각종 신용채권 커브(만기 8개: 1,2,3,4,5,10,20,30년),
-            원화 IRS 종합코드 6개월~30년 (만기별 단일 컬럼)
+  market(date, "<시트>__<시리즈명>" ...)   - 날짜 1행, 시리즈 1칼럼
+  series(column_name, sheet, col_idx, block_title, field)
 
-  Info(단기금리):
-    같은 레이아웃, 기준금리/CD(91일) 등 단일 계열들
+이 모듈은 series 의 (시트, 블록제목, 필드)를 대시보드가 쓰는 (그룹, 만기) 로 매핑한 뒤
+long-format DataFrame [날짜, 그룹, 만기, 값] 으로 돌려준다. 엑셀 시절의 매핑 규칙을 그대로 쓰므로
+인포맥스에서 시리즈를 추가/삭제해도 블록 제목/필드 규칙만 지키면 그대로 동작한다.
 
-이 모듈은 컬럼 위치를 하드코딩하지 않고 row2/row3 를 스캔해서 블록을 자동으로 찾는다 -
-인포맥스에서 커브를 추가/삭제해도 구조만 유지되면 그대로 동작한다.
+배포(Streamlit Cloud)에서는 market.db(전체, 깃 미추적) 대신 market_history.db(기준일 이전, 거의 안 바뀜) +
+market_recent.db(기준일 이후, 매일 갱신) 두 파일을 합쳐 읽는다 - 같은 날짜/시리즈는 recent 가 우선.
+data_version() 이 사용 중인 DB 파일들의 최신 mtime 을 돌려주므로 캐시 키로 쓰면 된다.
 
-성능: row1 F열("Data 개수")을 크게 잡으면(예: 99999) A열 날짜가 시작일부터 쭉 몇만 행 채워지고
-실데이터는 그 중간 어딘가에만 있어서 "위에서 N행만" 식으로는 못 자른다 - 그냥 전체를 순차로
-훑되(read_only + iter_rows(values_only=True), cell() 랜덤 접근 없음), 실제 값이 있는 행만
-결과에 담는다. 9MB 파일 기준 5~6초 정도라 매 위젯 조작마다 다시 돌면 안 되므로
-load_raw_data() 는 파일 mtime 을 키로 st.cache_data 캐싱한다 - 파일이 안 바뀌면 재파싱 안 함.
+load_raw_data() 는 data_version() 을 키로 st.cache_data 캐싱한다 - DB가 안 바뀌면 재조회 안 함.
 """
 
 from __future__ import annotations
 
-import datetime
+import os
 import re
+import sqlite3
 from pathlib import Path
 
-import openpyxl
 import pandas as pd
 import streamlit as st
 
 DATA_DIR = Path(__file__).parent / "data"
-EXCEL_PATH = DATA_DIR / "RawData.xlsx"
+DB_PATH = DATA_DIR / "market.db"
+HISTORY_DB_PATH = DATA_DIR / "market_history.db"
+RECENT_DB_PATH = DATA_DIR / "market_recent.db"
 
 SHEET_DAILY = "Info(국내금리)"
 SHEET_SHORT = "Info(단기금리)"
@@ -151,20 +147,6 @@ def _normalize_tenor_en(label: str) -> str | None:
     return None
 
 
-def _find_blocks(row2: tuple) -> list[tuple[int, int, str]]:
-    """
-    row2(0-based 튜플) 를 스캔해서 (시작컬럼, 끝컬럼, 블록제목) 리스트 반환.
-    블록 제목 셀은 항상 IMDH 수식의 계산 결과(상품명)이고, "단위: %" 같은 순수
-    텍스트 주석은 "단위"로 시작하므로 블록 시작으로 오인하지 않는다.
-    """
-    starts = [
-        c for c, v in enumerate(row2)
-        if isinstance(v, str) and v.strip() and not v.strip().startswith("단위")
-    ]
-    starts.append(len(row2))
-    return [(starts[i], starts[i + 1] - 1, row2[starts[i]]) for i in range(len(starts) - 1)]
-
-
 def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tuple[str, str] | None:
     title = (title or "").strip()
     if sheet_hint == "크레딧상세":
@@ -239,77 +221,94 @@ def _block_to_group_tenor(title: str, sub, sheet_hint: str | None = None) -> tup
     return None
 
 
-_HARD_ROW_CAP = 200_000  # 절대적인 안전장치 - 정상 시나리오에서는 도달하지 않음
+# 시트 -> (sheet_hint). 같은 (날짜, 그룹, 만기)가 여러 시트에 있으면 앞선 시트 값을 쓴다(엑셀 시절과 동일한 우선순위).
+_SHEET_ORDER = [
+    (SHEET_DAILY, None),
+    (SHEET_SHORT, None),
+    (SHEET_FOREIGN, None),
+    (SHEET_FX, None),
+    (SHEET_COMMODITY, "원자재"),
+    (SHEET_IRS_DETAIL, None),
+    (SHEET_FUTURES, None),
+    (SHEET_STOCK, "주가"),
+    (SHEET_CREDIT_DETAIL, "크레딧상세"),
+]
+
+_EMPTY = pd.DataFrame(columns=["날짜", "그룹", "만기", "값"])
 
 
-def _parse_sheet(ws, sheet_hint: str | None = None) -> pd.DataFrame:
-    rows_iter = ws.iter_rows(values_only=True)
+def _db_files() -> list[Path]:
+    """읽을 DB 파일 목록(앞 -> 뒤로 우선순위가 높아짐). 로컬 market.db 가 있으면 그것만, 없으면 history + recent."""
+    if DB_PATH.exists() and not os.environ.get("TRADINGBOARD_FORCE_SPLIT"):
+        return [DB_PATH]
+    if HISTORY_DB_PATH.exists() and RECENT_DB_PATH.exists():
+        return [HISTORY_DB_PATH, RECENT_DB_PATH]
+    return []
+
+
+def data_version() -> float:
+    """사용 중인 DB 파일들의 최신 수정시각 - 캐시 키/변경 감지용. DB가 없으면 0."""
+    files = _db_files()
+    return max((f.stat().st_mtime for f in files), default=0.0)
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+
+
+def _read_series(cons: list[sqlite3.Connection]) -> pd.DataFrame:
+    frames = [pd.read_sql_query("SELECT column_name, sheet, block_title, field FROM series", c) for c in cons]
+    return pd.concat(frames, ignore_index=True).drop_duplicates(subset="column_name", keep="last")
+
+
+def _read_wide(cons: list[sqlite3.Connection], cols: list[str]) -> pd.DataFrame:
+    """여러 DB 의 market 을 날짜 기준으로 합친다(뒤쪽 DB 의 값이 우선, 비어 있으면 앞쪽 값 유지)."""
+    merged = None
+    for con in cons:
+        have = {r[1] for r in con.execute("PRAGMA table_info(market)")}
+        use = [c for c in cols if c in have]
+        if not use:
+            continue
+        sel = ", ".join(f'"{c}"' for c in use)
+        part = pd.read_sql_query(f"SELECT date, {sel} FROM market", con).set_index("date")
+        merged = part if merged is None else part.combine_first(merged)
+    return merged if merged is not None else pd.DataFrame()
+
+
+def _load_sheet(cons: list[sqlite3.Connection], series: pd.DataFrame, sheet: str, hint: str | None) -> pd.DataFrame:
+    col_map: dict[str, tuple[str, str | None]] = {}
+    for r in series[series["sheet"] == sheet].itertuples(index=False):
+        mapped = _block_to_group_tenor(r.block_title, r.field or None, hint)
+        if mapped is not None:
+            col_map[r.column_name] = mapped
+    if not col_map:
+        return _EMPTY
+    wide = _read_wide(cons, list(col_map)).reset_index()
+    if wide.empty:
+        return _EMPTY
+    long = wide.melt(id_vars="date", var_name="col", value_name="값").dropna(subset=["값"])
+    long = long[long["값"] != 0]  # 0 은 "해당 만기 데이터 없음"
+    groups = long["col"].map({c: g for c, (g, _t) in col_map.items()})
+    tenors = long["col"].map({c: t for c, (_g, t) in col_map.items()})
+    return pd.DataFrame({"날짜": long["date"], "그룹": groups, "만기": tenors, "값": long["값"]})
+
+
+@st.cache_data(show_spinner="market.db 불러오는 중...")
+def _load_raw_data_cached(data_ver: float) -> tuple[pd.DataFrame, bool]:
+    cons = [_connect(f) for f in _db_files()]
     try:
-        next(rows_iter)  # row1 (설정값 - "Data 개수" 등, 신뢰하지 않고 실제 값 유무로 판단)
-        row2 = next(rows_iter)
-        row3 = next(rows_iter)
-    except StopIteration:
-        return pd.DataFrame(columns=["날짜", "그룹", "만기", "값"])
-
-    col_map: dict[int, tuple[str, str]] = {}
-    for start, end, title in _find_blocks(row2):
-        for c in range(start, end + 1):
-            if c == 0:
-                continue  # A열은 날짜 칼럼이라 데이터로 취급하지 않음
-            sub = row3[c] if c < len(row3) else None
-            mapped = _block_to_group_tenor(title, sub, sheet_hint)
-            if mapped is not None:
-                col_map[c] = mapped
-
-    # 딕셔너리 리스트 대신 컬럼별 리스트에 쌓는다 - 32년치 x 20여개 커브면 백만 행 단위라
-    # 행당 dict 하나씩 만들면 메모리를 너무 많이 먹어서(Streamlit Cloud 무료 인스턴스 OOM 원인) 이 방식이 필요함
-    dates, groups, tenors, vals = [], [], [], []
-    for i, r in enumerate(rows_iter):
-        if i >= _HARD_ROW_CAP:
-            break
-        date = r[0] if len(r) > 0 else None
-        if not isinstance(date, (datetime.date, datetime.datetime)):
-            continue  # 날짜 칸에 오타/잘못된 값이 들어간 행 방어 (실데이터가 맨 위부터 연속이라는 보장도 없어서 건너뛰기만 함)
-        for c, (group, tenor) in col_map.items():
-            val = r[c] if c < len(r) else None
-            if not isinstance(val, (int, float)) or isinstance(val, bool) or val == 0:
-                continue  # 값 칸에 날짜/텍스트가 잘못 들어간 셀 방어
-            dates.append(date)
-            groups.append(group)
-            tenors.append(tenor)
-            vals.append(val)
-    return pd.DataFrame({"날짜": dates, "그룹": groups, "만기": tenors, "값": vals})
-
-
-@st.cache_data(show_spinner="RawData.xlsx 불러오는 중...")
-def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
-    wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True, read_only=True)
-    try:
-        df_daily = _parse_sheet(wb[SHEET_DAILY]) if SHEET_DAILY in wb.sheetnames else pd.DataFrame()
-        df_short = _parse_sheet(wb[SHEET_SHORT]) if SHEET_SHORT in wb.sheetnames else pd.DataFrame()
-        df_foreign = _parse_sheet(wb[SHEET_FOREIGN]) if SHEET_FOREIGN in wb.sheetnames else pd.DataFrame()
-        df_fx = _parse_sheet(wb[SHEET_FX]) if SHEET_FX in wb.sheetnames else pd.DataFrame()
-        df_commodity = _parse_sheet(wb[SHEET_COMMODITY], sheet_hint="원자재") \
-            if SHEET_COMMODITY in wb.sheetnames else pd.DataFrame()
-        df_irs_detail = _parse_sheet(wb[SHEET_IRS_DETAIL]) if SHEET_IRS_DETAIL in wb.sheetnames else pd.DataFrame()
-        df_futures = _parse_sheet(wb[SHEET_FUTURES]) if SHEET_FUTURES in wb.sheetnames else pd.DataFrame()
-        df_stock = _parse_sheet(wb[SHEET_STOCK], sheet_hint="주가") if SHEET_STOCK in wb.sheetnames else pd.DataFrame()
-        df_credit_detail = _parse_sheet(wb[SHEET_CREDIT_DETAIL], sheet_hint="크레딧상세") \
-            if SHEET_CREDIT_DETAIL in wb.sheetnames else pd.DataFrame()
+        series = _read_series(cons)
+        frames = [_load_sheet(cons, series, sheet, hint) for sheet, hint in _SHEET_ORDER]
     finally:
-        wb.close()
+        for c in cons:
+            c.close()
 
-    df = pd.concat(
-        [df_daily, df_short, df_foreign, df_fx, df_commodity, df_irs_detail, df_futures, df_stock, df_credit_detail],
-        ignore_index=True,
-    ).drop_duplicates(subset=["날짜", "그룹", "만기"])
+    df = pd.concat([f for f in frames if not f.empty], ignore_index=True).drop_duplicates(subset=["날짜", "그룹", "만기"])
     # 인도네시아 2Y는 최근 값이 여러 영업일째 그대로 고정된 상태(비정상 캐리포워드)로 보여 제외
     df = df[~((df["그룹"] == "인도네시아") & (df["만기"] == "2Y"))]
     df["날짜"] = pd.to_datetime(df["날짜"])
     _known_tenors = set(TENOR_ORDER) | set(IRS_ZERO_FWD_TENOR_ORDER)
-    tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] + \
-                [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in df["만기"].unique() and t not in TENOR_ORDER] + \
-                [t for t in df["만기"].dropna().unique() if t not in _known_tenors]
+    tenor_cat = [t for t in TENOR_ORDER if t in df["만기"].unique()] +                 [t for t in IRS_ZERO_FWD_TENOR_ORDER if t in df["만기"].unique() and t not in TENOR_ORDER] +                 [t for t in df["만기"].dropna().unique() if t not in _known_tenors]
     df["만기"] = pd.Categorical(df["만기"], categories=tenor_cat, ordered=True)
     return df.sort_values(["그룹", "날짜", "만기"]).reset_index(drop=True), False
 
@@ -317,12 +316,12 @@ def _load_raw_data_cached(_mtime: float) -> tuple[pd.DataFrame, bool]:
 def load_raw_data() -> tuple[pd.DataFrame, bool]:
     """
     (long-format DataFrame [날짜, 그룹, 만기, 값], is_sample) 반환.
-    RawData.xlsx 가 없으면 빈 데이터프레임 + is_sample=True.
-    파일이 바뀌지 않는 한(mtime 기준) 캐시된 결과를 재사용한다.
+    DB 가 없으면 빈 데이터프레임 + is_sample=True.
+    DB 가 바뀌지 않는 한(data_version 기준) 캐시된 결과를 재사용한다.
     """
-    if not EXCEL_PATH.exists():
-        return pd.DataFrame(columns=["날짜", "그룹", "만기", "값"]), True
-    return _load_raw_data_cached(EXCEL_PATH.stat().st_mtime)
+    if not _db_files():
+        return _EMPTY.copy(), True
+    return _load_raw_data_cached(data_version())
 
 
 def latest_curve(df: pd.DataFrame, group: str) -> pd.DataFrame:
