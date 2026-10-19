@@ -774,6 +774,16 @@ function rescaleY(gd, start, end) {
   var data = gd.__rawData || gd.data;
   if (!data) return;
   var t0 = start.getTime(), t1 = end.getTime();
+  if (start.getTime() <= CHART_MIN_DATE.getTime()) {
+    var firstX = Infinity;
+    data.forEach(function(trace) {
+      if (trace.x && trace.x.length && typeof trace.x[0] === 'string') {
+        var f = new Date(trace.x[0]).getTime();
+        if (f < firstX) firstX = f;
+      }
+    });
+    if (firstX !== Infinity && firstX > t0) { t0 = firstX; start = new Date(firstX); }
+  }
   var ranges = {};
   data.forEach(function(trace) {
     if (!trace.x || !trace.y) return;
