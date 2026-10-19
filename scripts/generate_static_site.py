@@ -93,10 +93,12 @@ import app  # noqa: E402  (모킹 이후에 import해야 함)
 df = app.df
 MIN_D = df["날짜"].min().date()
 MAX_D = df["날짜"].max().date()
-# 전체 히스토리(1990~)를 다 박으면 차트 하나가 수백만 포인트라 파일이 감당 안 되는 크기로
-# 커짐 - 정적 사이트는 최근 5년치만 내장하고(대부분 페이지 버튼 범위 1M~5Y를 커버), 장기평균
-# 같은 스칼라 계산에만 전체 히스토리(MIN_D)를 그대로 사용한다.
-HIST_START_D = app._preset_to_start("5Y", MIN_D, MAX_D)
+# 전체 히스토리를 일별로 다 박으면 파일이 너무 커지므로(GitHub 파일 한도 100MB) 차트에는 전체 기간을 넣되
+# chart_div 에서 오래된 구간을 솎아낸다: 최근 5년=일별, 5~10년 전=주별, 10년 이전=월별(각 구간의 마지막 값).
+HIST_START_D = MIN_D
+THIN_DAILY_YEARS = 5
+THIN_WEEKLY_YEARS = 10
+Y_DECIMALS = 4  # 값 정밀도(내장 용량 절감) - 차트/호버 표시에는 충분
 
 
 # ================================================================ 차트/HTML 공용 유틸
@@ -129,6 +131,30 @@ def _decode_bdata(value):
     return [None if v != v else v for v in nums]  # NaN -> None (v!=v는 NaN 판별)
 
 
+def _thin_history(trace):
+    """날짜 x축 trace 의 오래된 구간을 솎아낸다(최근 5년 일별 / 5~10년 주별 / 10년 이전 월별, 각 구간의 마지막 점)."""
+    x = trace.get("x")
+    if not isinstance(x, list) or len(x) < 800 or not isinstance(x[0], str):
+        return
+    d = pd.to_datetime(pd.Series(x), errors="coerce")
+    if d.isna().any() or not d.is_monotonic_increasing:
+        return
+    end = d.iloc[-1]
+    daily = d >= end - pd.DateOffset(years=THIN_DAILY_YEARS)
+    weekly = (~daily) & (d >= end - pd.DateOffset(years=THIN_WEEKLY_YEARS))
+    monthly = (d < end - pd.DateOffset(years=THIN_WEEKLY_YEARS))
+    last_of_week = d.dt.strftime("%G-%V") != d.dt.strftime("%G-%V").shift(-1)
+    last_of_month = d.dt.strftime("%Y-%m") != d.dt.strftime("%Y-%m").shift(-1)
+    keep = (daily | (weekly & last_of_week) | (monthly & last_of_month)).to_numpy()
+    if keep.all():
+        return
+    n = len(x)
+    idx = keep.nonzero()[0]
+    for key, val in list(trace.items()):
+        if isinstance(val, list) and len(val) == n:
+            trace[key] = [val[i] for i in idx]
+
+
 _chart_counter = [0]
 
 
@@ -152,6 +178,10 @@ def chart_div(fig, timeseries: bool = True) -> str:
                 pass
         if "y" in trace:
             trace["y"] = _decode_bdata(trace["y"])
+            if isinstance(trace["y"], list):
+                trace["y"] = [round(v, Y_DECIMALS) if isinstance(v, float) else v for v in trace["y"]]
+        if timeseries:
+            _thin_history(trace)
     payload = json.dumps({"data": raw["data"], "layout": raw["layout"], "timeseries": timeseries},
                           separators=(",", ":"), default=str)
     ts_attr = "1" if timeseries else "0"
@@ -268,7 +298,7 @@ def df_to_html(d) -> str:
 
 
 NOTE_SIMPLIFIED = ('<p class="note">이 화면은 GitHub Pages 정적 버전이라 아래 항목만 라이브 앱과 다릅니다: '
-                    '① 기간 버튼은 1M~5Y 범위만 지원(그 이전 히스토리는 미포함), '
+                    '① 용량 때문에 차트의 오래된 구간은 솎아서 표시(최근 5년 일별 / 5~10년 전 주별 / 10년 이전 월별), '
                     '② 드롭다운으로 조합을 고르는 차트는 기본 선택값만 표시.</p>')
 
 
