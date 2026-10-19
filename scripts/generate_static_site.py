@@ -13,6 +13,7 @@ Plotly range selector 버튼으로 클라이언트에서 바로 확대/축소하
 import os
 import sys
 import json
+import numbers
 import shutil
 import base64
 import struct
@@ -143,7 +144,8 @@ def chart_div(fig, timeseries: bool = True) -> str:
     raw = fig.to_plotly_json()
     for trace in raw["data"]:
         x = trace.get("x")
-        if x is not None and len(x) > 0:
+        # 숫자 x축(산점도 등)은 날짜로 바꾸면 안 된다 - pd.Timestamp(숫자)는 1970년이 돼서 점이 차트 밖으로 사라짐
+        if x is not None and not isinstance(x, dict) and len(x) > 0 and not isinstance(x[0], numbers.Number):
             try:
                 trace["x"] = [str(pd.Timestamp(v).date()) for v in x]
             except (ValueError, TypeError):
