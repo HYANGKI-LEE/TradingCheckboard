@@ -4,13 +4,13 @@
 
 ## 데이터 업데이트 흐름 (매일 자동)
 
-Windows 작업 스케줄러 `TradingCheckboard_DailyUpdate` 가 평일 08:00에 `scripts/daily_update.py` 를 실행한다.
+Windows 작업 스케줄러 `TradingCheckboard_DailyUpdate` 가 평일 07:30에 `scripts/daily_update.py` 를 실행한다.
 
 1. **RawData_master.xlsx 업데이트** - `scripts/refresh_master.ps1` 이 마스터 복사본에서 인포맥스 IMDH 를 재조회하고
    (DB에서 비어 있는 구간부터 시작일(B1)을 자동 조정), **전 영업일 날짜가 시트별로 채워졌는지 확인**한 뒤 마스터를 교체
 2. **market.db 업데이트** - 마스터의 값을 DB에 반영 (엑셀에 값이 있는 칸만 덮어쓰고, 없는 날짜는 추가, 엑셀에 없는 칼럼은 유지)
 
-조건: PC가 켜져 있거나 절전모드, 윈도우 로그인 상태, **인포맥스 로그인 상태**. 실패하면 30분 간격으로 최대 4번 재시도하고,
+조건: PC가 켜져 있거나 절전모드, 윈도우 로그인 상태, **인포맥스 로그인 상태**. 실패하면 20분 간격으로 최대 7번(07:30~09:30) 재시도하고,
 끝까지 실패하면 마스터/DB를 건드리지 않는다. 로그는 `scripts/logs/daily_YYYYMMDD.log`.
 
 3. **배포** - `market_recent.db`(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(`docs/index.html`)도 DB 기준으로
