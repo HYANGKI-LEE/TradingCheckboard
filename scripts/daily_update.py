@@ -180,16 +180,24 @@ def _git(*cmd):
 
 
 def _user_site_packages():
-    """작업 스케줄러 세션에서는 파이썬이 사용자 site-packages(streamlit 등이 설치된 곳)를 못 찾는 경우가 있어 경로를 직접 계산한다."""
+    """streamlit 등이 설치된 site-packages 경로를 찾는다.
+    주의: Claude 데스크톱 앱(MSIX) 안에서 `pip install --user` 한 패키지는 AppData 가상화 때문에 일반 프로세스(작업 스케줄러 등)가
+    보는 APPDATA/Python/... 가 아니라 LOCALAPPDATA/Packages/Claude_*/LocalCache/Roaming/Python/... 에 실제로 저장된다.
+    그래서 일반 경로와 패키지 경로를 모두 후보로 두고, streamlit 이 실제로 들어 있는 곳을 고른다."""
+    import glob
     import site
+    ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
     cands = []
     try:
         cands.append(site.getusersitepackages())
     except Exception:  # noqa: BLE001
         pass
-    ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
     cands.append(os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Python", ver, "site-packages"))
-    return next((c for c in cands if c and os.path.isdir(c)), None)
+    local = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    cands += sorted(glob.glob(os.path.join(local, "Packages", "*", "LocalCache", "Roaming", "Python", ver, "site-packages")))
+    existing = [c for c in cands if c and os.path.isdir(c)]
+    with_st = [c for c in existing if os.path.isdir(os.path.join(c, "streamlit"))]
+    return (with_st or existing or [None])[0]
 
 
 def build_static_site():
@@ -202,7 +210,7 @@ def build_static_site():
     out = (p.stdout + p.stderr).decode("utf-8", errors="replace").strip().splitlines()
     done = [l for l in out if l.startswith("완료")]
     if p.returncode != 0 or not done:
-        raise RuntimeError("정적 사이트 생성 실패: " + " | ".join(out[-3:])[:300])
+        raise RuntimeError("정적 사이트 생성 실패 (site-packages=" + str(us) + "): " + " | ".join(out[-3:])[:300])
     log("  [배포] 정적 사이트 생성 " + done[-1].split("\\")[-1])
 
 
