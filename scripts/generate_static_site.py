@@ -332,8 +332,7 @@ def render_main() -> str:
                 'A1CP(6M)/A20CP(6M), 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.</p>' + table2)
     )
     corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D))
-    corr_note = (f'<p class="caption">KOSPI·WTI는 일간 수익률(%), 국고3Y는 일간 금리 변화(bp) 기준. {app.CORR_WINDOW}영업일 롤링 상관계수이며 '
-                 '주말·휴장일(변동 0으로 이월된 날)은 제외했습니다.</p>')
+    corr_note = f'<p class="caption">{app.CORR_NOTE}</p>'
     tab_corr = period_scope("1Y", corr_chart + corr_note)
     return tabs_html(["변동", "상관관계"], [body, tab_corr])
 

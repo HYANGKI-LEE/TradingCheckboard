@@ -512,7 +512,11 @@ CORR_SERIES = [
     ("KOSPI vs 국고3Y 금리", "#2980B9"),
     ("WTI vs 국고3Y 금리", "#E67E22"),
     ("WTI vs KOSPI", "#27AE60"),
+    ("USDKRW vs 국고3Y 금리", "#8E44AD"),
+    ("USDKRW vs KOSPI", "#C0392B"),
 ]
+CORR_NOTE = (f"KOSPI·WTI·USDKRW는 일간 수익률(%), 국고3Y는 일간 금리 변화(bp) 기준. {CORR_WINDOW}영업일 롤링 상관계수이며 "
+             "주말·휴장일(변동 0으로 이월된 날)과 WTI 음수 가격 구간, 환율 이상치(일간 ±20% 초과)는 제외했습니다.")
 
 
 def _group_series(group: str, tenor: str | None = None) -> pd.Series:
@@ -524,31 +528,48 @@ def _group_series(group: str, tenor: str | None = None) -> pd.Series:
 
 @st.cache_data(show_spinner="상관계수 계산 중...")
 def _rolling_corr_cached(data_ver: float) -> pd.DataFrame:
-    """KOSPI/WTI 일간 수익률(%)과 국고3Y 금리 일간 변화(bp)의 30영업일 롤링 상관계수 3종 (열 = CORR_SERIES 이름).
+    """KOSPI/WTI/USDKRW 일간 수익률(%)과 국고3Y 금리 일간 변화(bp)의 30영업일 롤링 상관계수 (열 = CORR_SERIES 이름).
 
     - 평일만 사용(인포맥스가 주말/휴일을 직전 값으로 채우므로 그대로 두면 변동 0이 섞여 상관이 왜곡됨)
-    - 휴장일 제거: KOSPI 수익률이 정확히 0인 날은 한국 휴장으로 보고 뺌, WTI 도 같은 방식(+ 가격이 0 이하인 구간 제외)
-    - 쌍마다 유효한 날만 남겨서 연속된 30개 관측치로 윈도우를 잡음
+    - 휴장일 제거: 수익률이 정확히 0인 날은 해당 시장 휴장으로 보고 뺌(금리 쌍은 KOSPI 휴장일 기준). WTI 가격 0 이하 구간,
+      환율 일간 ±20% 초과 이상치도 제외
+    - 쌍마다 따로 정렬해서 유효한 날만 남기고, 연속된 30개 관측치로 윈도우를 잡음
     """
-    k, w, b = _group_series("KOSPI"), _group_series("WTI"), _group_series("국고채", "3Y")
-    d = pd.concat({"kospi": k, "wti": w, "ktb": b}, axis=1)
-    d = d[d.index.dayofweek < 5].dropna()
-    kospi_ret = d["kospi"].pct_change() * 100
-    wti_ret = d["wti"].pct_change() * 100
-    wti_ok = (d["wti"] > 0) & (d["wti"].shift(1) > 0)
-    ktb_chg = d["ktb"].diff() * 100
+    d = pd.concat({
+        "kospi": _group_series("KOSPI"), "wti": _group_series("WTI"),
+        "krw": _group_series("KRW"), "ktb": _group_series("국고채", "3Y"),
+    }, axis=1)
+    d = d[d.index.dayofweek < 5]
 
-    kr_open = kospi_ret != 0
-    oil_open = (wti_ret != 0) & wti_ok
+    def prep(cols: list[str]) -> tuple[pd.DataFrame, pd.Series]:
+        x = d[cols].dropna()
+        out, ok = {}, pd.Series(True, index=x.index)
+        for c in cols:
+            if c == "ktb":
+                out[c] = x[c].diff() * 100
+                continue
+            r = x[c].pct_change() * 100
+            out[c] = r
+            ok &= r != 0
+            if c == "wti":
+                ok &= (x[c] > 0) & (x[c].shift(1) > 0)
+            if c == "krw":
+                ok &= r.abs() < 20
+        return pd.DataFrame(out), ok
 
-    def roll(a: pd.Series, b_: pd.Series, mask: pd.Series) -> pd.Series:
-        pair = pd.concat({"a": a, "b": b_}, axis=1)[mask].dropna()
-        return pair["a"].rolling(CORR_WINDOW).corr(pair["b"])
+    def roll(a: str, b: str, extra: tuple[str, ...] = ()) -> pd.Series:
+        cols = [a, b] + [e for e in extra if e not in (a, b)]
+        r, ok = prep(cols)
+        pair = r[[a, b]][ok].dropna()
+        return pair[a].rolling(CORR_WINDOW).corr(pair[b])
 
+    names = [n for n, _ in CORR_SERIES]
     out = pd.DataFrame({
-        CORR_SERIES[0][0]: roll(kospi_ret, ktb_chg, kr_open),
-        CORR_SERIES[1][0]: roll(wti_ret, ktb_chg, oil_open & kr_open),
-        CORR_SERIES[2][0]: roll(wti_ret, kospi_ret, oil_open & kr_open),
+        names[0]: roll("kospi", "ktb"),
+        names[1]: roll("wti", "ktb", ("kospi",)),
+        names[2]: roll("wti", "kospi"),
+        names[3]: roll("krw", "ktb", ("kospi",)),
+        names[4]: roll("krw", "kospi"),
     })
     return out.dropna(how="all")
 
@@ -581,8 +602,7 @@ def page_main():
             start_date, end_date = period_selector(corr_all.index.min().date(), corr_all.index.max().date(),
                                                    key_prefix="main_corr", default="1Y")
         st.plotly_chart(_rolling_corr_chart(start_date, end_date), use_container_width=True, key="main_corr_chart")
-        st.caption(f"KOSPI·WTI는 일간 수익률(%), 국고3Y는 일간 금리 변화(bp) 기준. {CORR_WINDOW}영업일 롤링 상관계수이며 "
-                   "주말·휴장일(변동 0으로 이월된 날)은 제외했습니다.")
+        st.caption(CORR_NOTE)
 
     with tab_change:
         st.markdown("#### 주요 금리 : 변동")
