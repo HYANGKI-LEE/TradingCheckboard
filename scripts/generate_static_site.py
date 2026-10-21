@@ -333,7 +333,17 @@ def render_main() -> str:
     )
     corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D))
     corr_note = f'<p class="caption">{app.CORR_NOTE}</p>'
-    tab_corr = period_scope("1Y", corr_chart + corr_note)
+    tab_corr = period_scope("1Y", grid(3, [corr_chart]) + corr_note)  # 차트는 항상 3열 그리드 기준 - 1열
+
+    checks = []
+    for i, (name, _) in enumerate(app.CORR_SERIES):
+        table, stats = app._corr_check(i)
+        tbl = table.round(3).astype(str).reset_index()
+        stt = stats.reset_index().rename(columns={"index": "항목"})
+        checks.append(f'<h5 style="margin:14px 0 6px;">{name}</h5>' +
+                      grid(2, [df_to_html(tbl), df_to_html(stt)]))
+    tab_corr += ('<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:600;">'
+                 f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
     return tabs_html(["변동", "상관관계"], [body, tab_corr])
 
 

@@ -515,6 +515,15 @@ CORR_SERIES = [
     ("USDKRW vs 국고3Y 금리", "#8E44AD"),
     ("USDKRW vs KOSPI", "#C0392B"),
 ]
+# (a, b, 휴장일 판단용 추가 시리즈) - 쌍마다 따로 날짜를 맞춘다. 순서는 CORR_SERIES 와 같다.
+CORR_PAIRS = [
+    ("kospi", "ktb", ()),
+    ("wti", "ktb", ("kospi",)),
+    ("wti", "kospi", ()),
+    ("krw", "ktb", ("kospi",)),
+    ("krw", "kospi", ()),
+]
+CORR_LABELS = {"kospi": "KOSPI", "wti": "WTI", "krw": "USDKRW", "ktb": "국고3Y"}
 CORR_NOTE = (f"KOSPI·WTI·USDKRW는 일간 수익률(%), 국고3Y는 일간 금리 변화(bp) 기준. {CORR_WINDOW}영업일 롤링 상관계수이며 "
              "주말·휴장일(변동 0으로 이월된 날)과 WTI 음수 가격 구간, 환율 이상치(일간 ±20% 초과)는 제외했습니다.")
 
@@ -526,52 +535,77 @@ def _group_series(group: str, tenor: str | None = None) -> pd.Series:
     return sub.set_index("날짜")["값"].sort_index()
 
 
-@st.cache_data(show_spinner="상관계수 계산 중...")
-def _rolling_corr_cached(data_ver: float) -> pd.DataFrame:
-    """KOSPI/WTI/USDKRW 일간 수익률(%)과 국고3Y 금리 일간 변화(bp)의 30영업일 롤링 상관계수 (열 = CORR_SERIES 이름).
-
-    - 평일만 사용(인포맥스가 주말/휴일을 직전 값으로 채우므로 그대로 두면 변동 0이 섞여 상관이 왜곡됨)
-    - 휴장일 제거: 수익률이 정확히 0인 날은 해당 시장 휴장으로 보고 뺌(금리 쌍은 KOSPI 휴장일 기준). WTI 가격 0 이하 구간,
-      환율 일간 ±20% 초과 이상치도 제외
-    - 쌍마다 따로 정렬해서 유효한 날만 남기고, 연속된 30개 관측치로 윈도우를 잡음
-    """
+def _corr_base_frame() -> pd.DataFrame:
     d = pd.concat({
         "kospi": _group_series("KOSPI"), "wti": _group_series("WTI"),
         "krw": _group_series("KRW"), "ktb": _group_series("국고채", "3Y"),
     }, axis=1)
-    d = d[d.index.dayofweek < 5]
+    return d[d.index.dayofweek < 5]  # 인포맥스가 주말/휴일을 직전 값으로 채우므로 평일만 사용
 
-    def prep(cols: list[str]) -> tuple[pd.DataFrame, pd.Series]:
-        x = d[cols].dropna()
-        out, ok = {}, pd.Series(True, index=x.index)
-        for c in cols:
-            if c == "ktb":
-                out[c] = x[c].diff() * 100
-                continue
-            r = x[c].pct_change() * 100
-            out[c] = r
-            ok &= r != 0
-            if c == "wti":
-                ok &= (x[c] > 0) & (x[c].shift(1) > 0)
-            if c == "krw":
-                ok &= r.abs() < 20
-        return pd.DataFrame(out), ok
 
-    def roll(a: str, b: str, extra: tuple[str, ...] = ()) -> pd.Series:
-        cols = [a, b] + [e for e in extra if e not in (a, b)]
-        r, ok = prep(cols)
-        pair = r[[a, b]][ok].dropna()
-        return pair[a].rolling(CORR_WINDOW).corr(pair[b])
+def _corr_pair_frame(d: pd.DataFrame, a: str, b: str, extra: tuple[str, ...] = ()) -> pd.DataFrame:
+    """한 쌍의 상관계수 입력 데이터: [a_lv, b_lv, a_ret, b_ret] (유효한 날만, 연속된 관측치).
 
-    names = [n for n, _ in CORR_SERIES]
-    out = pd.DataFrame({
-        names[0]: roll("kospi", "ktb"),
-        names[1]: roll("wti", "ktb", ("kospi",)),
-        names[2]: roll("wti", "kospi"),
-        names[3]: roll("krw", "ktb", ("kospi",)),
-        names[4]: roll("krw", "kospi"),
+    - 수익률(%)/금리 변화(bp)가 정확히 0인 날은 해당 시장 휴장(직전 값 이월)으로 보고 제외 (금리 쌍은 KOSPI 휴장일 기준)
+    - WTI 가격 0 이하 구간, 환율 일간 ±20% 초과 이상치 제외
+    """
+    cols = [a, b] + [e for e in extra if e not in (a, b)]
+    x = d[cols].dropna()
+    rets, ok = {}, pd.Series(True, index=x.index)
+    for c in cols:
+        if c == "ktb":
+            rets[c] = x[c].diff() * 100
+            continue
+        r = x[c].pct_change() * 100
+        rets[c] = r
+        ok &= r != 0
+        if c == "wti":
+            ok &= (x[c] > 0) & (x[c].shift(1) > 0)
+        if c == "krw":
+            ok &= r.abs() < 20
+    out = pd.DataFrame({f"{a}_lv": x[a], f"{b}_lv": x[b], f"{a}_ret": rets[a], f"{b}_ret": rets[b]})
+    return out[ok].dropna()
+
+
+@st.cache_data(show_spinner="상관계수 계산 중...")
+def _rolling_corr_cached(data_ver: float) -> pd.DataFrame:
+    """각 쌍의 일간 변동률 30영업일 롤링 상관계수 (열 = CORR_SERIES 이름)."""
+    d = _corr_base_frame()
+    cols = {}
+    for (name, _), (a, b, extra) in zip(CORR_SERIES, CORR_PAIRS):
+        pf = _corr_pair_frame(d, a, b, extra)
+        cols[name] = pf[f"{a}_ret"].rolling(CORR_WINDOW).corr(pf[f"{b}_ret"])
+    return pd.DataFrame(cols).dropna(how="all")
+
+
+def _corr_check(pair_idx: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """검증용: 최근 CORR_WINDOW 개 관측치 표와 상관계수를 단계별로 계산한 표."""
+    a, b, extra = CORR_PAIRS[pair_idx]
+    pf = _corr_pair_frame(_corr_base_frame(), a, b, extra).tail(CORR_WINDOW)
+    la, lb = CORR_LABELS[a], CORR_LABELS[b]
+    a_unit = "%"
+    b_unit = "bp" if b == "ktb" else "%"
+    table = pd.DataFrame({
+        f"{la} 값": pf[f"{a}_lv"], f"{lb} 값": pf[f"{b}_lv"],
+        f"{la} 변동({a_unit})": pf[f"{a}_ret"], f"{lb} 변동({b_unit})": pf[f"{b}_ret"],
     })
-    return out.dropna(how="all")
+    table.index = table.index.strftime("%Y-%m-%d")
+    table.index.name = "날짜"
+    ra, rb = pf[f"{a}_ret"], pf[f"{b}_ret"]
+    n = len(pf)
+    cov = float(((ra - ra.mean()) * (rb - rb.mean())).sum() / (n - 1))
+    corr = cov / (ra.std() * rb.std())
+    stats = pd.DataFrame({"값": [
+        f"{pf.index.min():%Y-%m-%d} ~ {pf.index.max():%Y-%m-%d}", n,
+        f"{ra.mean():.4f}", f"{ra.std():.4f}", f"{rb.mean():.4f}", f"{rb.std():.4f}",
+        f"{cov:.4f}", f"{corr:.4f}", f"{ra.corr(rb):.4f}",
+    ]}, index=[
+        "기간", "관측치 수(n)",
+        f"{la} 변동 평균({a_unit})", f"{la} 변동 표준편차({a_unit})",
+        f"{lb} 변동 평균({b_unit})", f"{lb} 변동 표준편차({b_unit})",
+        "공분산 = Σ(x−x̄)(y−ȳ)/(n−1)", "상관계수 = 공분산 / (σx·σy)", "(검산) pandas corr",
+    ])
+    return table, stats
 
 
 def _rolling_corr_chart(start_date, end_date):
@@ -583,8 +617,8 @@ def _rolling_corr_chart(start_date, end_date):
         fig.add_trace(go.Scatter(x=s_.index, y=s_.values, mode="lines", name=name, line=dict(width=2, color=color)))
     fig.add_hline(y=0, line_color="gray", line_width=1)
     fig.update_layout(
-        title=f"{CORR_WINDOW}일 롤링 상관계수 (일간 변동률 기준)", height=440,
-        yaxis=dict(title="상관계수"), legend=dict(orientation="h", y=-0.2), margin=dict(t=50),
+        title=f"{CORR_WINDOW}일 롤링 상관계수", height=470,
+        yaxis=dict(title="상관계수"), legend=dict(orientation="h", y=-0.22, font=dict(size=11)), margin=dict(t=50, b=10),
     )
     return fig
 
@@ -601,8 +635,16 @@ def page_main():
         with _sticky_subheader("main_corr"):
             start_date, end_date = period_selector(corr_all.index.min().date(), corr_all.index.max().date(),
                                                    key_prefix="main_corr", default="1Y")
-        st.plotly_chart(_rolling_corr_chart(start_date, end_date), use_container_width=True, key="main_corr_chart")
+        corr_cols = st.columns(3)  # 차트는 항상 3열 그리드 기준 - 이 차트는 1열
+        with corr_cols[0]:
+            st.plotly_chart(_rolling_corr_chart(start_date, end_date), use_container_width=True, key="main_corr_chart")
         st.caption(CORR_NOTE)
+        with st.expander(f"검증: 최근 {CORR_WINDOW}영업일 입력 데이터와 상관계수 계산"):
+            pair_names = [n for n, _ in CORR_SERIES]
+            picked = st.selectbox("상관계수 쌍", pair_names, key="main_corr_check_pair")
+            check_table, check_stats = _corr_check(pair_names.index(picked))
+            st.dataframe(check_table.round(3), use_container_width=True, height=420)
+            st.dataframe(check_stats, use_container_width=True)
 
     with tab_change:
         st.markdown("#### 주요 금리 : 변동")
