@@ -203,7 +203,9 @@ def _user_site_packages():
 def build_static_site():
     script = os.path.join(_HERE, "generate_static_site.py")
     env = dict(os.environ)
-    us = _user_site_packages()
+    # scripts/vendor 에 streamlit 까지 설치돼 있으면 그것만으로 충분(스크립트가 vendor 를 직접 sys.path 에 넣음).
+    # 없을 때만 사용자 site-packages 를 보조 경로로 쓴다.
+    us = None if os.path.isdir(os.path.join(_VENDOR, "streamlit")) else _user_site_packages()
     if us:
         env["PYTHONPATH"] = us + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     p = subprocess.run([sys.executable, "-X", "utf8", "-W", "ignore", script], capture_output=True, cwd=REPO, env=env)
