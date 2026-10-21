@@ -344,7 +344,10 @@ def render_main() -> str:
                       grid(2, [df_to_html(tbl), df_to_html(stt)]))
     tab_corr += ('<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:600;">'
                  f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
-    return tabs_html(["변동", "상관관계"], [body, tab_corr])
+    key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D))
+    tab_key = period_scope("1Y", grid(3, [key_chart]) +
+                           '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>')
+    return tabs_html(["주요 차트", "변동", "상관관계"], [tab_key, body, tab_corr])
 
 
 # ================================================================ 국내금리
