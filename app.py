@@ -506,12 +506,83 @@ def _main_spread_sections_cached(data_ver: float) -> list:
     ]
 
 
+# ================================================================ Main > 상관관계
+CORR_WINDOW = 30  # 롤링 상관계수 윈도우(관측 일수, 영업일)
+CORR_SERIES = [
+    ("KOSPI vs 국고3Y 금리", "#2980B9"),
+    ("WTI vs 국고3Y 금리", "#E67E22"),
+    ("WTI vs KOSPI", "#27AE60"),
+]
+
+
+def _group_series(group: str, tenor: str | None = None) -> pd.Series:
+    sub = df[df["그룹"] == group]
+    if tenor is not None:
+        sub = sub[sub["만기"] == tenor]
+    return sub.set_index("날짜")["값"].sort_index()
+
+
+@st.cache_data(show_spinner="상관계수 계산 중...")
+def _rolling_corr_cached(data_ver: float) -> pd.DataFrame:
+    """KOSPI/WTI 일간 수익률(%)과 국고3Y 금리 일간 변화(bp)의 30영업일 롤링 상관계수 3종 (열 = CORR_SERIES 이름).
+
+    - 평일만 사용(인포맥스가 주말/휴일을 직전 값으로 채우므로 그대로 두면 변동 0이 섞여 상관이 왜곡됨)
+    - 휴장일 제거: KOSPI 수익률이 정확히 0인 날은 한국 휴장으로 보고 뺌, WTI 도 같은 방식(+ 가격이 0 이하인 구간 제외)
+    - 쌍마다 유효한 날만 남겨서 연속된 30개 관측치로 윈도우를 잡음
+    """
+    k, w, b = _group_series("KOSPI"), _group_series("WTI"), _group_series("국고채", "3Y")
+    d = pd.concat({"kospi": k, "wti": w, "ktb": b}, axis=1)
+    d = d[d.index.dayofweek < 5].dropna()
+    kospi_ret = d["kospi"].pct_change() * 100
+    wti_ret = d["wti"].pct_change() * 100
+    wti_ok = (d["wti"] > 0) & (d["wti"].shift(1) > 0)
+    ktb_chg = d["ktb"].diff() * 100
+
+    kr_open = kospi_ret != 0
+    oil_open = (wti_ret != 0) & wti_ok
+
+    def roll(a: pd.Series, b_: pd.Series, mask: pd.Series) -> pd.Series:
+        pair = pd.concat({"a": a, "b": b_}, axis=1)[mask].dropna()
+        return pair["a"].rolling(CORR_WINDOW).corr(pair["b"])
+
+    out = pd.DataFrame({
+        CORR_SERIES[0][0]: roll(kospi_ret, ktb_chg, kr_open),
+        CORR_SERIES[1][0]: roll(wti_ret, ktb_chg, oil_open & kr_open),
+        CORR_SERIES[2][0]: roll(wti_ret, kospi_ret, oil_open & kr_open),
+    })
+    return out.dropna(how="all")
+
+
+def _rolling_corr_chart(start_date, end_date):
+    corr = _rolling_corr_cached(data_version())
+    view = corr[(corr.index.date >= start_date) & (corr.index.date <= end_date)]
+    fig = go.Figure()
+    for name, color in CORR_SERIES:
+        s_ = view[name].dropna()
+        fig.add_trace(go.Scatter(x=s_.index, y=s_.values, mode="lines", name=name, line=dict(width=2, color=color)))
+    fig.add_hline(y=0, line_color="gray", line_width=1)
+    fig.update_layout(
+        title=f"{CORR_WINDOW}일 롤링 상관계수 (일간 변동률 기준)", height=440,
+        yaxis=dict(title="상관계수"), legend=dict(orientation="h", y=-0.2), margin=dict(t=50),
+    )
+    return fig
+
+
 def page_main():
     with _sticky_header():
         st.title("✨ Main")
 
     with _sticky_tabbar_short():
-        tab_change, = st.tabs(["변동"])
+        tab_change, tab_corr = st.tabs(["변동", "상관관계"])
+
+    with tab_corr:
+        corr_all = _rolling_corr_cached(data_version())
+        with _sticky_subheader("main_corr"):
+            start_date, end_date = period_selector(corr_all.index.min().date(), corr_all.index.max().date(),
+                                                   key_prefix="main_corr", default="1Y")
+        st.plotly_chart(_rolling_corr_chart(start_date, end_date), use_container_width=True, key="main_corr_chart")
+        st.caption(f"KOSPI·WTI는 일간 수익률(%), 국고3Y는 일간 금리 변화(bp) 기준. {CORR_WINDOW}영업일 롤링 상관계수이며 "
+                   "주말·휴장일(변동 0으로 이월된 날)은 제외했습니다.")
 
     with tab_change:
         st.markdown("#### 주요 금리 : 변동")
