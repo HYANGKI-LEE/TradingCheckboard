@@ -664,9 +664,8 @@ def page_main():
         with _sticky_subheader("main_key"):
             key_start, key_end = period_selector(key_spread["날짜"].min().date(), key_spread["날짜"].max().date(),
                                                  key_prefix="main_key", default="1Y")
-        key_cols = st.columns(3)  # 차트는 항상 3열 그리드 기준 - 이 차트는 1열
-        with key_cols[0]:
-            st.plotly_chart(_main_key_chart(key_start, key_end), use_container_width=True, key="main_key_chart")
+        # 사용자 요청: 이 차트만 3열 그리드 예외로 가로 전체 폭(3열 꽉 채움)
+        st.plotly_chart(_main_key_chart(key_start, key_end), use_container_width=True, key="main_key_chart")
         st.caption("국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).")
 
     with tab_corr:
