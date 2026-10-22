@@ -345,8 +345,11 @@ def render_main() -> str:
     tab_corr += ('<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:600;">'
                  f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
     key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D))
-    tab_key = period_scope("1Y", key_chart +  # 사용자 요청: 이 차트만 가로 전체 폭(3열 꽉 채움)
-                           '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>')
+    rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D))
+    tab_key = period_scope("1Y", key_chart +  # 사용자 요청: 주요 차트 탭의 차트는 가로 전체 폭(3열 꽉 채움), 기간 버튼은 공통
+                           '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>'
+                           '<div style="height:24px"></div>' + rate_chart +
+                           '<p class="caption">한국은행 기준금리와 CD(91일물) 금리(%).</p>')
     return tabs_html(["주요 차트", "변동", "상관관계"], [tab_key, body, tab_corr])
 
 

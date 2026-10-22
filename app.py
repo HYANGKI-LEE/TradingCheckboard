@@ -535,6 +535,28 @@ def _main_key_chart(start_date, end_date):
     return fig
 
 
+def _main_rate_chart(start_date, end_date):
+    """한국은행 기준금리와 CD 91일물 금리(%, 단일 축)를 한 차트에."""
+    def _view(group: str, tenor: str | None = None) -> pd.DataFrame:
+        sub = df[df["그룹"] == group]
+        if tenor is not None:
+            sub = sub[sub["만기"] == tenor]
+        sub = sub[["날짜", "값"]].sort_values("날짜")
+        return sub[(sub["날짜"].dt.date >= start_date) & (sub["날짜"].dt.date <= end_date)]
+
+    base, cd = _view("기준금리"), _view("CD", "91D")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=base["날짜"], y=base["값"], mode="lines", name="기준금리",
+                              line=dict(width=2, color="#2980B9", shape="hv")))
+    fig.add_trace(go.Scatter(x=cd["날짜"], y=cd["값"], mode="lines", name="CD 91일물",
+                              line=dict(width=2, color="#E67E22")))
+    fig.update_layout(
+        title="기준금리 & CD 91일물", height=470, yaxis=dict(title="금리(%)"),
+        legend=dict(orientation="h", y=-0.22, font=dict(size=11)), margin=dict(t=50, b=10),
+    )
+    return fig
+
+
 # ================================================================ Main > 상관관계
 CORR_WINDOW = 30  # 롤링 상관계수 윈도우(관측 일수, 영업일)
 CORR_SERIES = [
@@ -661,12 +683,17 @@ def page_main():
 
     with tab_key:
         key_spread = _main_key_spread()
+        cd_all = df[(df["그룹"] == "CD") & (df["만기"] == "91D")]["날짜"]
+        key_min = min(key_spread["날짜"].min(), cd_all.min()).date()
         with _sticky_subheader("main_key"):
-            key_start, key_end = period_selector(key_spread["날짜"].min().date(), key_spread["날짜"].max().date(),
+            key_start, key_end = period_selector(key_min, key_spread["날짜"].max().date(),
                                                  key_prefix="main_key", default="1Y")
-        # 사용자 요청: 이 차트만 3열 그리드 예외로 가로 전체 폭(3열 꽉 채움)
+        # 사용자 요청: 주요 차트 탭의 차트는 3열 그리드 예외로 가로 전체 폭(3열 꽉 채움), 기간 선택은 두 차트 공통
         st.plotly_chart(_main_key_chart(key_start, key_end), use_container_width=True, key="main_key_chart")
         st.caption("국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).")
+        _chart_gap()
+        st.plotly_chart(_main_rate_chart(key_start, key_end), use_container_width=True, key="main_rate_chart")
+        st.caption("한국은행 기준금리와 CD(91일물) 금리(%).")
 
     with tab_corr:
         corr_all = _rolling_corr_cached(data_version())
