@@ -24,6 +24,7 @@ function Log($m) { Write-Output "$(Get-Date -Format 'HH:mm:ss') [excel] $m" }
 function Get-Signature($wb) {
     $parts = @()
     foreach ($ws in $wb.Sheets) {
+        if (-not $ws.Name.StartsWith("Info(")) { continue }
         $lastRow = $ws.Cells(1, 1).End(4).Row
         $parts += "$($ws.Name)=$lastRow/$($ws.Cells($lastRow, 1).Value2)"
     }
@@ -47,7 +48,7 @@ try {
 
     if ($StartDate) {
         $d = [datetime]::ParseExact($StartDate, "yyyy-MM-dd", $null)
-        foreach ($ws in $wb.Sheets) { $ws.Range("B1").Value2 = $d.ToOADate() }
+        foreach ($ws in $wb.Sheets) { if ($ws.Name.StartsWith("Info(")) { $ws.Range("B1").Value2 = $d.ToOADate() } }
         Log "시작일(B1) -> $StartDate (전 시트)"
     }
 

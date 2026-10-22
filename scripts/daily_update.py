@@ -62,6 +62,11 @@ def log(msg):
         f.write(line + "\n")
 
 
+def is_data_sheet(name: str) -> bool:
+    """인포맥스 데이터 시트('Info(...)')만 파이프라인 대상으로 삼는다 - 메모/계산용 시트가 있어도 업데이트가 막히지 않게."""
+    return name.startswith("Info(")
+
+
 def prev_weekday(d):
     d -= dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -116,6 +121,8 @@ def check_freshness(path, expected):
     exp = expected.isoformat()
     rows, tot_ok, tot_n, stale = [], 0, 0, []
     for ws in wb.worksheets:
+        if not is_data_sheet(ws.title):
+            continue
         df, hdr = B.read_sheet(ws, dt.date(2099, 12, 31))
         n = df.shape[1]
         if n == 0:
@@ -152,8 +159,18 @@ def update_db(master_path, expected):
     before = con.execute("SELECT COUNT(*) FROM market").fetchone()[0]
     con.close()
     wb = openpyxl.load_workbook(master_path, data_only=True, read_only=True)
-    sheets = list(wb.sheetnames)
+    sheets = [n for n in wb.sheetnames if is_data_sheet(n)]
+    skipped = [n for n in wb.sheetnames if not is_data_sheet(n)]
     wb.close()
+    if skipped:
+        log(f"  [DB] 'Info(' 로 시작하지 않는 시트는 건너뜀: {skipped}")
+    con = sqlite3.connect(tmp)
+    db_sheets = {r[0] for r in con.execute("SELECT DISTINCT sheet FROM series")}
+    con.close()
+    for n in sorted(set(sheets) - db_sheets):
+        log(f"  [DB] WARNING: DB에 없던 새 시트 '{n}' - 칼럼이 새로 추가됨 (대시보드 반영은 data_loader 규칙 추가가 필요할 수 있음)")
+    for n in sorted(db_sheets - set(sheets)):
+        log(f"  [DB] WARNING: DB에는 있는데 마스터에 없는 시트 '{n}' - 이름을 바꿨다면 DB 칼럼 이전이 필요함 (그 시트 데이터는 더 이상 갱신되지 않음)")
     for sh in sheets:
         r = U.update_sheet(tmp, master_path, sh, drop_missing=False)
         note = []
