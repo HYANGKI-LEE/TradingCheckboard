@@ -147,6 +147,24 @@ def _preset_to_start(preset: str, min_date, max_date):
     return max(start, min_date)
 
 
+def _chg_ref(preset: str, latest_date):
+    """변동표(1M/1Y/MTD/QTD/YTD)의 기준일. 기준 종가 = 이 날짜 이전(포함)의 마지막 관측값.
+    - MTD: 당월 1일 / QTD: 전분기 마지막 날(분기 시작 전날) / YTD: 1월 1일(휴장이라 전년 말 종가)
+    - 차트용 _preset_to_start 와 달리 데이터 시작일로 자르지 않는다: 이력이 모자라면 기준 관측값이 없어서 변동이 '-' 로 표시
+      (예전엔 첫 관측값을 기준으로 삼아 YTD 같은 값이 틀리게 나왔음)"""
+    ld = pd.Timestamp(latest_date)
+    if preset == "MTD":
+        return ld.replace(day=1).date()
+    if preset == "QTD":
+        q_start = ld.replace(month=(ld.month - 1) // 3 * 3 + 1, day=1)
+        return (q_start - pd.Timedelta(days=1)).date()
+    if preset == "YTD":
+        return ld.replace(month=1, day=1).date()
+    n = int(preset[:-1])
+    offset = pd.DateOffset(months=n) if preset.endswith("M") else pd.DateOffset(years=n)
+    return (ld - offset).date()
+
+
 def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y"):
     """기간 프리셋(1M~10Y, MTD/QTD/YTD/MAX) + 직접설정(캘린더) 선택 위젯. (시작일, 종료일) 반환."""
     preset = st.segmented_control(
@@ -246,6 +264,17 @@ def _plot_change_multi(series_list: list[tuple[str, str, str]], start_date, end_
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
+STICKY_RATE_GROUPS = {"CD", "기준금리"}
+
+
+def _market_asof_date():
+    """국내 시장 기준일 = 국고3Y 가 마지막으로 실제 갱신(값 변화)된 날짜."""
+    h = curve_history(df, "국고채", "3Y")[["날짜", "값"]].sort_values("날짜").reset_index(drop=True)
+    if len(h) < 2:
+        return None
+    return h.loc[_effective_latest_idx(h["값"].tolist()), "날짜"].date()
+
+
 def _rate_change_row(label: str, group: str, tenor: str | None = None, scale: float = 100) -> dict | None:
     """항목 한 줄: 현재가 + 1d/1w/MTD/QTD/YTD 변동(bp). 당일 미갱신(캐리포워드)은 건너뛰고
     실제 값이 바뀐 가장 최근 시점을 기준으로 계산 (해외금리 변동표와 동일한 로직).
@@ -257,6 +286,13 @@ def _rate_change_row(label: str, group: str, tenor: str | None = None, scale: fl
     if len(hist) < 2:
         return None
     idx = _effective_latest_idx(hist["값"].tolist())
+    if group in STICKY_RATE_GROUPS:
+        # 값이 며칠씩 그대로인 게 정상인 계열은 '마지막으로 값이 바뀐 날'이 아니라 시장 기준일의 행을 최신으로 본다
+        asof = _market_asof_date()
+        if asof is not None:
+            upto = hist.index[hist["날짜"].dt.date <= asof]
+            if len(upto) and upto[-1] > idx:
+                idx = int(upto[-1])
     latest_date = hist.loc[idx, "날짜"].date()
     latest_val = hist.loc[idx, "값"]
     prev_val = hist.loc[idx - 1, "값"] if idx > 0 else None
@@ -272,11 +308,11 @@ def _rate_change_row(label: str, group: str, tenor: str | None = None, scale: fl
         "현재가": round(latest_val, 3),
         "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
-        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
-        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
-        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "1M": chg(_chg_ref("1M", latest_date)),
+        "1Y": chg(_chg_ref("1Y", latest_date)),
+        "MTD": chg(_chg_ref("MTD", latest_date)),
+        "QTD": chg(_chg_ref("QTD", latest_date)),
+        "YTD": chg(_chg_ref("YTD", latest_date)),
     }
 
 
@@ -305,11 +341,11 @@ def _pct_change_row(label: str, hist: pd.DataFrame, decimals: int = 2) -> dict |
         "현재가": round(latest_val, decimals),
         "1d": round((latest_val - prev_val) / prev_val * 100, 2) if prev_val else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
-        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
-        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
-        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "1M": chg(_chg_ref("1M", latest_date)),
+        "1Y": chg(_chg_ref("1Y", latest_date)),
+        "MTD": chg(_chg_ref("MTD", latest_date)),
+        "QTD": chg(_chg_ref("QTD", latest_date)),
+        "YTD": chg(_chg_ref("YTD", latest_date)),
     }
 
 
@@ -321,7 +357,7 @@ def _format_bp_html(val) -> str:
         return f'<span style="color:#2E5EAA">▲{val:.1f}</span>'
     if val < 0:
         return f'<span style="color:#C0392B">▼{abs(val):.1f}</span>'
-    return f"{val:.1f}"
+    return "-"
 
 
 DEFAULT_CHANGE_COLS = ["1d", "1w", "1M", "1Y", "MTD", "QTD", "YTD"]
@@ -399,7 +435,7 @@ MAIN_RATE_ROWS = [
     ("CD(3M)", "CD", "91D"), ("A1CP(3M)", "ABCP A1", "3M"), ("A1CP(1Y)", "ABCP A1", "1Y"),
     ("IRS(6M)", "IRS", "6M"), ("IRS(9M)", "IRS", "9M"), ("IRS(1Y)", "IRS", "1Y"),
     ("IRS(1.5Y)", "IRS", "1.5Y"), ("IRS(2Y)", "IRS", "2Y"),
-    ("3선", "선물3년", "내재수익률"), ("10선", "선물10년", "내재수익률"),
+    ("3선", "선물3년", "현재가"), ("10선", "선물10년", "현재가"),  # 가격 / 틱(=가격변동x100)
 ]
 
 # 크레딧 3Y 스프레드 (Info(크레딧) 시트, bp 원값이라 scale=1). 여전채=기타금융채 (AA0/BBB+ 등급은 시트에 없어 제외)
@@ -849,11 +885,11 @@ def _rate_change_row_from_hist(hist: pd.DataFrame, scale: float = 100) -> dict |
         "현재가": round(latest_val, 3),
         "1d": round((latest_val - prev_val) * scale, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "1M": chg(_preset_to_start("1M", min_d, latest_date)),
-        "1Y": chg(_preset_to_start("1Y", min_d, latest_date)),
-        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
-        "YTD": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "1M": chg(_chg_ref("1M", latest_date)),
+        "1Y": chg(_chg_ref("1Y", latest_date)),
+        "MTD": chg(_chg_ref("MTD", latest_date)),
+        "QTD": chg(_chg_ref("QTD", latest_date)),
+        "YTD": chg(_chg_ref("YTD", latest_date)),
         "1Y_avg": avg(1), "3Y_avg": avg(3), "5Y_avg": avg(5), "전체_avg": avg(None),
     }
 
@@ -1249,9 +1285,9 @@ def _irs_ktb_stats(tenor: str) -> dict | None:
         "현재가": round(latest_val, 1),
         "1d": round(latest_val - prev_val, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "월초": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "분기초": chg(_preset_to_start("QTD", min_d, latest_date)),
-        "연초": chg(_preset_to_start("YTD", min_d, latest_date)),
+        "월초": chg(_chg_ref("MTD", latest_date)),
+        "분기초": chg(_chg_ref("QTD", latest_date)),
+        "연초": chg(_chg_ref("YTD", latest_date)),
         "장기평균": round(hist_upto["값"].mean(), 1),
         "3Y_Min": round(recent_3y["값"].min(), 1) if not recent_3y.empty else None,
         "3Y_Max": round(recent_3y["값"].max(), 1) if not recent_3y.empty else None,
@@ -1320,8 +1356,8 @@ def _irs_spread_matrix_row(long_t: str, short_t: str) -> dict | None:
         "표준화": zscore,
         "1d": round(latest_val - prev_val, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "MTD": chg(_chg_ref("MTD", latest_date)),
+        "QTD": chg(_chg_ref("QTD", latest_date)),
     }
 
 
@@ -1380,8 +1416,8 @@ def _irs_forward_row(tenor: str) -> dict | None:
         "반영횟수": hikes,
         "1d": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
         "1w": chg(latest_date - pd.Timedelta(days=7)),
-        "MTD": chg(_preset_to_start("MTD", min_d, latest_date)),
-        "QTD": chg(_preset_to_start("QTD", min_d, latest_date)),
+        "MTD": chg(_chg_ref("MTD", latest_date)),
+        "QTD": chg(_chg_ref("QTD", latest_date)),
     }
 
 
@@ -1581,10 +1617,10 @@ def _foreign_rate_change_table(tenor: str = "10Y") -> pd.DataFrame:
             "현재가(%)": round(latest_val, 3),
             "전일대비(bp)": round((latest_val - prev_val) * 100, 1) if prev_val is not None else None,
             "1W(bp)": chg(latest_date - pd.Timedelta(days=7)),
-            "MTD(bp)": chg(_preset_to_start("MTD", min_d, latest_date)),
-            "1M(bp)": chg(_preset_to_start("1M", min_d, latest_date)),
-            "QTD(bp)": chg(_preset_to_start("QTD", min_d, latest_date)),
-            "YTD(bp)": chg(_preset_to_start("YTD", min_d, latest_date)),
+            "MTD(bp)": chg(_chg_ref("MTD", latest_date)),
+            "1M(bp)": chg(_chg_ref("1M", latest_date)),
+            "QTD(bp)": chg(_chg_ref("QTD", latest_date)),
+            "YTD(bp)": chg(_chg_ref("YTD", latest_date)),
         })
     return pd.DataFrame(rows)
 
