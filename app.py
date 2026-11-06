@@ -543,28 +543,29 @@ def _main_spread_sections_cached(data_ver: float) -> list:
 
 
 # ================================================================ Main > 주요 차트
-def _main_key_spread() -> pd.DataFrame:
-    """국고채 10Y - 3Y 스프레드(bp) 전체 히스토리 [날짜, 값]."""
-    y10 = curve_history(df, "국고채", "10Y")[["날짜", "값"]].rename(columns={"값": "y10"})
-    y3 = curve_history(df, "국고채", "3Y")[["날짜", "값"]].rename(columns={"값": "y3"})
-    m = y10.merge(y3, on="날짜", how="inner").sort_values("날짜")
-    m["값"] = (m["y10"] - m["y3"]) * 100
+def _main_key_spread(long_t: str = "10Y", short_t: str = "3Y") -> pd.DataFrame:
+    """국고채 long_t - short_t 스프레드(bp) 전체 히스토리 [날짜, 값]."""
+    y_l = curve_history(df, "국고채", long_t)[["날짜", "값"]].rename(columns={"값": "yl"})
+    y_s = curve_history(df, "국고채", short_t)[["날짜", "값"]].rename(columns={"값": "ys"})
+    m = y_l.merge(y_s, on="날짜", how="inner").sort_values("날짜")
+    m["값"] = (m["yl"] - m["ys"]) * 100
     return m[["날짜", "값"]]
 
 
-def _main_key_chart(start_date, end_date):
-    """국고채 3-10 스프레드(좌, bp)와 기준금리(우, %)를 한 차트에."""
-    sp = _main_key_spread()
+def _main_key_chart(start_date, end_date, long_t: str = "10Y", short_t: str = "3Y"):
+    """국고채 (short_t-long_t) 스프레드(좌, bp)와 기준금리(우, %)를 한 차트에. 기본은 3-10."""
+    label = f"{short_t.rstrip('Y')}-{long_t.rstrip('Y')} 스프레드"
+    sp = _main_key_spread(long_t, short_t)
     sp = sp[(sp["날짜"].dt.date >= start_date) & (sp["날짜"].dt.date <= end_date)]
     base = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
     base = base[(base["날짜"].dt.date >= start_date) & (base["날짜"].dt.date <= end_date)]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=sp["날짜"], y=sp["값"], mode="lines", name="3-10 스프레드",
+    fig.add_trace(go.Scatter(x=sp["날짜"], y=sp["값"], mode="lines", name=label,
                               line=dict(width=2, color="#C0392B")))
     fig.add_trace(go.Scatter(x=base["날짜"], y=base["값"], mode="lines", name="기준금리 (우)",
                               line=dict(width=2, color="#2980B9", shape="hv"), yaxis="y2"))
     fig.update_layout(
-        title="3-10 스프레드 & 기준금리", height=470,
+        title=f"{label} & 기준금리", height=470,
         yaxis=dict(title="스프레드(bp)"), yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
         legend=dict(orientation="h", y=-0.22, font=dict(size=11)), margin=dict(t=50, b=10),
     )
@@ -730,6 +731,9 @@ def page_main():
         _chart_gap()
         st.plotly_chart(_main_rate_chart(key_start, key_end), use_container_width=True, key="main_rate_chart")
         st.caption("한국은행 기준금리와 CD(91일물) 금리(%).")
+        _chart_gap()
+        st.plotly_chart(_main_key_chart(key_start, key_end, "30Y", "10Y"), use_container_width=True, key="main_key_chart_10_30")
+        st.caption("국고채 30년 - 10년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).")
 
     with tab_corr:
         corr_all = _rolling_corr_cached(data_version())

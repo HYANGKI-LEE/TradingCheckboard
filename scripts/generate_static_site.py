@@ -332,7 +332,7 @@ def render_main() -> str:
                 '<p class="caption">CD/CP는 통안 단기물 데이터가 없어 기준금리 대비로 대체했습니다. '
                 'A1CP(6M)/A20CP(6M), 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.</p>' + table2)
     )
-    corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D))
+    corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D), thin=False)
     corr_note = f'<p class="caption">{app.CORR_NOTE}</p>'
     tab_corr = period_scope("1Y", grid(3, [corr_chart]) + corr_note)  # 차트는 항상 3열 그리드 기준 - 1열
 
@@ -347,10 +347,13 @@ def render_main() -> str:
                  f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
     key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D), thin=False)
     rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D), thin=False)
+    key_chart_30 = chart_div(app._main_key_chart(HIST_START_D, MAX_D, "30Y", "10Y"), thin=False)
     tab_key = period_scope("1Y", key_chart +  # 사용자 요청: 주요 차트 탭의 차트는 가로 전체 폭(3열 꽉 채움), 기간 버튼은 공통
                            '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>'
                            '<div style="height:24px"></div>' + rate_chart +
-                           '<p class="caption">한국은행 기준금리와 CD(91일물) 금리(%).</p>')
+                           '<p class="caption">한국은행 기준금리와 CD(91일물) 금리(%).</p>'
+                           '<div style="height:24px"></div>' + key_chart_30 +
+                           '<p class="caption">국고채 30년 - 10년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>')
     return tabs_html(["주요 차트", "변동", "상관관계"], [tab_key, body, tab_corr])
 
 
