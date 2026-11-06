@@ -158,12 +158,13 @@ def _thin_history(trace):
 _chart_counter = [0]
 
 
-def chart_div(fig, timeseries: bool = True) -> str:
+def chart_div(fig, timeseries: bool = True, thin: bool = True) -> str:
     """fig.to_html()은 날짜를 마이크로초 단위 ISO 문자열로 통째로 내장해서 차트 하나가
     수백 KB씩 나감 - 직접 JSON을 만들면서 날짜 축만 'YYYY-MM-DD'로 짧게 바꿔서 내장
     용량을 줄인다(카테고리 축(바 차트 등)은 변환 실패하면 원본 그대로 둠).
     timeseries: 날짜 x축 차트인지 여부 - period-scope의 공통 기간 버튼이 이 값이
-    True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐)."""
+    True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐).
+    thin: False면 오래된 구간을 솎아내지 않고 전 기간 일별로 내장(주요 차트처럼 몇 개 안 되는 차트용)."""
     _finalize(fig)
     _chart_counter[0] += 1
     div_id = f"chart{_chart_counter[0]}"
@@ -180,7 +181,7 @@ def chart_div(fig, timeseries: bool = True) -> str:
             trace["y"] = _decode_bdata(trace["y"])
             if isinstance(trace["y"], list):
                 trace["y"] = [round(v, Y_DECIMALS) if isinstance(v, float) else v for v in trace["y"]]
-        if timeseries:
+        if timeseries and thin:
             _thin_history(trace)
     payload = json.dumps({"data": raw["data"], "layout": raw["layout"], "timeseries": timeseries},
                           separators=(",", ":"), default=str)
@@ -344,8 +345,8 @@ def render_main() -> str:
                       grid(2, [df_to_html(tbl), df_to_html(stt)]))
     tab_corr += ('<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:600;">'
                  f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
-    key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D))
-    rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D))
+    key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D), thin=False)
+    rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D), thin=False)
     tab_key = period_scope("1Y", key_chart +  # 사용자 요청: 주요 차트 탭의 차트는 가로 전체 폭(3열 꽉 채움), 기간 버튼은 공통
                            '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>'
                            '<div style="height:24px"></div>' + rate_chart +
