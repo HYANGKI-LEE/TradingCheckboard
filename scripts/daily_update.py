@@ -1,4 +1,7 @@
-"""매일 데이터 업데이트 루틴 (Windows 작업 스케줄러가 평일 아침에 실행).
+"""매일 데이터 업데이트 루틴 (Windows 작업 스케줄러가 평일 07:30 + 윈도우 로그온 때 실행).
+
+로그온 트리거가 있어서 PC가 07:30 이후에 켜져도 켜진 시점에 시도한다. 그래서 같은 날 두 번 돌지 않도록 성공하면
+logs/done_YYYYMMDD 표식을 남기고, 표식이 있으면 (--force 가 아닌 한) 바로 종료한다.
 
   1. RawData_master.xlsx 업데이트: 인포맥스 IMDH 재조회(refresh_master.ps1) 후
      "전 영업일 날짜"가 시트별로 채워졌는지 확인 -> 통과해야 마스터를 교체
@@ -52,6 +55,7 @@ MIN_SHEET = 0.50     # 시트별 최소 비율
 GAP_COVERAGE = 0.60  # DB에서 "그 날짜는 채워졌다"고 보는 시트 내 시리즈 비율
 
 LOG_PATH = os.path.join(LOG_DIR, f"daily_{dt.date.today():%Y%m%d}.log")
+DONE_MARK = os.path.join(LOG_DIR, f"done_{dt.date.today():%Y%m%d}")
 
 
 def log(msg):
@@ -311,12 +315,17 @@ def main():
     if today.weekday() >= 5 and not args.force:
         log("주말이라 건너뜁니다")
         return 0
+    if os.path.exists(DONE_MARK) and not args.force:
+        log("오늘은 이미 업데이트 완료 - 건너뜁니다")
+        return 0
     expected = prev_weekday(today)
     log(f"=== 일일 업데이트 시작 (오늘 {today}, 전 영업일 {expected}) ===")
     for n in range(1, args.max_attempts + 1):
         log(f"--- 시도 {n}/{args.max_attempts} ---")
         try:
             if attempt(args, today, expected):
+                with open(DONE_MARK, "w", encoding="utf-8") as f:
+                    f.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}")
                 log("=== 완료 ===")
                 return 0
         except Exception as e:  # noqa: BLE001
