@@ -207,16 +207,20 @@ def scatter_chart_div(fig, merged) -> str:
 _scope_counter = [0]
 
 
-def period_scope(default: str, body: str) -> str:
+def period_scope(default: str, body: str, extra: list | None = None) -> str:
     """body: 이 스코프로 감쌀 HTML(그 안의 chart_div가 만든 차트들이 이 스코프의
     기간 버튼 적용 대상이 됨). 라이브 앱에서 기간선택 위젯 하나가 페이지 전체
     (또는 탭 하나)에 적용되던 것과 동일한 범위 단위."""
     _scope_counter[0] += 1
     scope_id = f"scope{_scope_counter[0]}"
+    presets = list(PERIOD_PRESETS)
+    if extra:  # app.period_selector 와 동일하게 MAX 앞에 삽입
+        i = presets.index("MAX")
+        presets[i:i] = extra
     btns = "".join(
         f'<button data-preset="{p}" onclick="{"toggleCustom" if p == "설정" else "applyPeriod"}'
         f'(\'{scope_id}\'{"" if p == "설정" else f",\'{p}\'"},this)">{p}</button>'
-        for p in PERIOD_PRESETS
+        for p in presets
     )
     bar = (f'<div class="period-bar" data-scope="{scope_id}">'
            f'<span class="period-label">기간</span>{btns}</div>'
@@ -540,7 +544,7 @@ def render_irs() -> str:
 
     body = tabs_html(["변동", "Par rate", "스프레드", "Zero rate", "Fwd rate", "버터플라이"],
                       [tab_change, tab_par, tab_spread, tab_zero, tab_fwd_rate, tab_fly])
-    return period_scope("1Y", body)
+    return period_scope("1Y", body, extra=app.IRS_EXTRA_PRESETS)
 
 
 # ================================================================ Relative Value
@@ -792,6 +796,7 @@ function presetRange(preset) {
   else if (preset === 'QTD') { var q = Math.floor(end.getMonth()/3)*3; start = new Date(end.getFullYear(), q, 1); }
   else if (preset === 'YTD') start = new Date(end.getFullYear(), 0, 1);
   else if (preset === 'MAX') start = CHART_MIN_DATE;
+  else if (preset.charAt(0) === '~') start = new Date(parseInt(preset.slice(1), 10), 0, 1);
   else {
     var n = parseInt(preset, 10), unit = preset.slice(-1);
     start = new Date(end.getTime());

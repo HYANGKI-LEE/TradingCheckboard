@@ -128,6 +128,7 @@ def _with_ma(series: pd.Series) -> dict:
 
 
 PERIOD_PRESETS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "10Y", "MTD", "QTD", "YTD", "MAX", "설정"]
+IRS_EXTRA_PRESETS = ["~2010", "~2020"]  # 해당 연도 1월 1일부터 최신일까지
 
 
 def _preset_to_start(preset: str, min_date, max_date):
@@ -140,6 +141,8 @@ def _preset_to_start(preset: str, min_date, max_date):
         start = max_date.replace(month=1, day=1)
     elif preset == "MAX":
         start = min_date
+    elif preset.startswith("~"):
+        start = max_date.replace(year=int(preset[1:]), month=1, day=1)
     else:
         n = int(preset[:-1])
         offset = pd.DateOffset(months=n) if preset.endswith("M") else pd.DateOffset(years=n)
@@ -165,10 +168,15 @@ def _chg_ref(preset: str, latest_date):
     return (ld - offset).date()
 
 
-def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y"):
-    """기간 프리셋(1M~10Y, MTD/QTD/YTD/MAX) + 직접설정(캘린더) 선택 위젯. (시작일, 종료일) 반환."""
+def period_selector(min_date, max_date, key_prefix: str, default: str = "5Y", extra: list | None = None):
+    """기간 프리셋(1M~10Y, MTD/QTD/YTD/MAX) + 직접설정(캘린더) 선택 위젯. (시작일, 종료일) 반환.
+    extra: 이 위젯에만 더할 프리셋(예: "~2010") - MAX 앞에 들어간다."""
+    options = list(PERIOD_PRESETS)
+    if extra:
+        i = options.index("MAX")
+        options[i:i] = extra
     preset = st.segmented_control(
-        "기간", PERIOD_PRESETS, default=default, key=f"{key_prefix}_period",
+        "기간", options, default=default, key=f"{key_prefix}_period",
     ) or default
 
     if preset == "설정":
@@ -1458,7 +1466,8 @@ def page_irs_detail():
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
     with _sticky_header():
         st.title("🔁 IRS")
-        start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y")
+        start_date, end_date = period_selector(min_date, max_date, key_prefix="irs_detail", default="1Y",
+                                              extra=IRS_EXTRA_PRESETS)
     available_tenors = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
 
     with _sticky_tabbar_tall():
