@@ -13,7 +13,7 @@ Windows 작업 스케줄러 `TradingCheckboard_DailyUpdate` 가 평일 07:40에 
 조건: PC가 켜져 있거나 절전모드, 윈도우 로그인 상태, **인포맥스 로그인 상태**. 실패하면 10분 간격으로 최대 12번(07:40~09:30) 재시도하고,
 끝까지 실패하면 마스터/DB를 건드리지 않는다. 로그는 `scripts/logs/daily_YYYYMMDD.log`.
 
-3. **배포** - `market_recent.db`(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(`docs/index.html`)도 DB 기준으로
+3. **배포** - `market_recent.db`(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(`docs/index.html` + 페이지별 `docs/chartdata/*.js`)도 DB 기준으로
    다시 생성해서 GitHub 에 푸시 -> Streamlit Cloud 자동 재배포 + Pages 갱신(푸시 1회 증가분은 1MB 안팎).
    과거분 `market_history.db`(약 74MB)는 한 번만 올려두고 매일 올리지 않는다. 앱은 두 파일을 합쳐 읽고 같은 날짜는 recent 가 우선.
    (`market.db`(로컬 전체본)가 있으면 그것만 읽는다 - 로컬 개발용, 깃 미추적)

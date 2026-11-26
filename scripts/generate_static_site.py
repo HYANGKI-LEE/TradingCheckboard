@@ -93,11 +93,10 @@ import app  # noqa: E402  (모킹 이후에 import해야 함)
 df = app.df
 MIN_D = df["날짜"].min().date()
 MAX_D = df["날짜"].max().date()
-# 전체 히스토리를 일별로 다 박으면 파일이 너무 커지므로(GitHub 파일 한도 100MB) 차트에는 전체 기간을 넣되
-# chart_div 에서 오래된 구간을 솎아낸다: 최근 5년=일별, 5~10년 전=주별, 10년 이전=월별(각 구간의 마지막 값).
+# 모든 차트는 전 기간 일별. 한 파일에 담으면 GitHub 파일 한도(100MB)를 넘기 때문에 차트 데이터는 페이지별
+# docs/chartdata/<page>.js 로 분리하고(날짜 축은 페이지 안에서 한 번만 저장), 브라우저는 화면에 보이는 차트만 그린다.
 HIST_START_D = MIN_D
-THIN_DAILY_YEARS = 5
-THIN_WEEKLY_YEARS = 10
+MAX_FILE_MB = 95  # 이 크기를 넘는 파일은 push 가 거절되므로 생성 단계에서 실패시킨다
 Y_DECIMALS = 4  # 값 정밀도(내장 용량 절감) - 차트/호버 표시에는 충분
 
 
@@ -131,40 +130,31 @@ def _decode_bdata(value):
     return [None if v != v else v for v in nums]  # NaN -> None (v!=v는 NaN 판별)
 
 
-def _thin_history(trace):
-    """날짜 x축 trace 의 오래된 구간을 솎아낸다(최근 5년 일별 / 5~10년 주별 / 10년 이전 월별, 각 구간의 마지막 점)."""
-    x = trace.get("x")
-    if not isinstance(x, list) or len(x) < 800 or not isinstance(x[0], str):
-        return
-    d = pd.to_datetime(pd.Series(x), errors="coerce")
-    if d.isna().any() or not d.is_monotonic_increasing:
-        return
-    end = d.iloc[-1]
-    daily = d >= end - pd.DateOffset(years=THIN_DAILY_YEARS)
-    weekly = (~daily) & (d >= end - pd.DateOffset(years=THIN_WEEKLY_YEARS))
-    monthly = (d < end - pd.DateOffset(years=THIN_WEEKLY_YEARS))
-    last_of_week = d.dt.strftime("%G-%V") != d.dt.strftime("%G-%V").shift(-1)
-    last_of_month = d.dt.strftime("%Y-%m") != d.dt.strftime("%Y-%m").shift(-1)
-    keep = (daily | (weekly & last_of_week) | (monthly & last_of_month)).to_numpy()
-    if keep.all():
-        return
-    n = len(x)
-    idx = keep.nonzero()[0]
-    for key, val in list(trace.items()):
-        if isinstance(val, list) and len(val) == n:
-            trace[key] = [val[i] for i in idx]
-
-
 _chart_counter = [0]
+_page_data = {"axes": [], "charts": {}}  # 지금 렌더링 중인 페이지의 차트 데이터
+_axis_index = {}
 
 
-def chart_div(fig, timeseries: bool = True, thin: bool = True) -> str:
-    """fig.to_html()은 날짜를 마이크로초 단위 ISO 문자열로 통째로 내장해서 차트 하나가
-    수백 KB씩 나감 - 직접 JSON을 만들면서 날짜 축만 'YYYY-MM-DD'로 짧게 바꿔서 내장
-    용량을 줄인다(카테고리 축(바 차트 등)은 변환 실패하면 원본 그대로 둠).
+def _reset_page_data():
+    _page_data["axes"], _page_data["charts"] = [], {}
+    _axis_index.clear()
+
+
+def _axis_ref(x: list) -> dict:
+    """날짜 x축은 trace 마다 반복 저장하지 않고 페이지 공용 목록의 번호로 바꾼다(브라우저에서 복원)."""
+    key = tuple(x)
+    if key not in _axis_index:
+        _axis_index[key] = len(_page_data["axes"])
+        _page_data["axes"].append(x)
+    return {"$x": _axis_index[key]}
+
+
+def chart_div(fig, timeseries: bool = True) -> str:
+    """차트 자리(div)만 HTML 에 두고 데이터는 _page_data 에 모은다. fig.to_html()은 날짜를 마이크로초 단위
+    ISO 문자열로 통째로 내장해서 크기가 커지므로, 직접 JSON 을 만들면서 날짜 축만 'YYYY-MM-DD'로 바꾼다
+    (카테고리 축(바 차트 등)은 변환 실패하면 원본 그대로 둠).
     timeseries: 날짜 x축 차트인지 여부 - period-scope의 공통 기간 버튼이 이 값이
-    True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐).
-    thin: False면 오래된 구간을 솎아내지 않고 전 기간 일별로 내장(주요 차트처럼 몇 개 안 되는 차트용)."""
+    True인 차트에만 적용된다(히트맵/막대그래프/산점도는 건드리면 축이 깨짐)."""
     _finalize(fig)
     _chart_counter[0] += 1
     div_id = f"chart{_chart_counter[0]}"
@@ -181,14 +171,12 @@ def chart_div(fig, timeseries: bool = True, thin: bool = True) -> str:
             trace["y"] = _decode_bdata(trace["y"])
             if isinstance(trace["y"], list):
                 trace["y"] = [round(v, Y_DECIMALS) if isinstance(v, float) else v for v in trace["y"]]
-        if timeseries and thin:
-            _thin_history(trace)
-    payload = json.dumps({"data": raw["data"], "layout": raw["layout"], "timeseries": timeseries},
-                          separators=(",", ":"), default=str)
+        if timeseries and isinstance(trace.get("x"), list) and len(trace["x"]) > 50:
+            trace["x"] = _axis_ref(trace["x"])
+    _page_data["charts"][div_id] = {"data": raw["data"], "layout": raw["layout"]}
+    height = raw["layout"].get("height") or 450  # 그리기 전에도 자리를 차지해야 '보이는 차트만 그리기'가 동작
     ts_attr = "1" if timeseries else "0"
-    return (f'<div id="{div_id}" class="plotly-chart" data-ts="{ts_attr}"></div>'
-            f'<script type="application/json" id="{div_id}-data">{payload}</script>'
-            f'<script>renderChart("{div_id}");</script>')
+    return f'<div id="{div_id}" class="plotly-chart" data-ts="{ts_attr}" style="min-height:{height}px"></div>'
 
 
 def scatter_chart_div(fig, merged) -> str:
@@ -198,10 +186,10 @@ def scatter_chart_div(fig, merged) -> str:
     div_id = f"chart{_chart_counter[0]}"
     html = html.replace(f'id="{div_id}" class="plotly-chart" data-ts="0"',
                         f'id="{div_id}" class="plotly-chart" data-ts="0" data-scatter="1"', 1)
-    pts = {"d": [str(v.date()) for v in merged["날짜"]],
-           "x": [round(float(v), 4) for v in merged["x"]],
-           "y": [round(float(v), 4) for v in merged["y"]]}
-    return html + f'<script type="application/json" id="{div_id}-pts">{json.dumps(pts, separators=(",", ":"))}</script>'
+    _page_data["charts"][div_id]["pts"] = {"d": [str(v.date()) for v in merged["날짜"]],
+                                           "x": [round(float(v), 4) for v in merged["x"]],
+                                           "y": [round(float(v), 4) for v in merged["y"]]}
+    return html
 
 
 _scope_counter = [0]
@@ -315,9 +303,8 @@ def df_to_html(d) -> str:
     return "".join(html)
 
 
-NOTE_SIMPLIFIED = ('<p class="note">이 화면은 GitHub Pages 정적 버전이라 아래 항목만 라이브 앱과 다릅니다: '
-                    '① 용량 때문에 차트의 오래된 구간은 솎아서 표시(최근 5년 일별 / 5~10년 전 주별 / 10년 이전 월별), '
-                    '② 드롭다운으로 조합을 고르는 차트는 기본 선택값만 표시.</p>')
+NOTE_SIMPLIFIED = ('<p class="note">이 화면은 GitHub Pages 정적 버전이라, 드롭다운으로 조합을 고르는 차트는 '
+                    '기본 선택값만 표시합니다.</p>')
 
 
 # ================================================================ Main
@@ -336,7 +323,7 @@ def render_main() -> str:
                 '<p class="caption">CD/CP는 통안 단기물 데이터가 없어 기준금리 대비로 대체했습니다. '
                 'A1CP(6M)/A20CP(6M), 미국 IG/HY는 현재 데이터에 해당 시계열이 없어 제외했습니다.</p>' + table2)
     )
-    corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D), thin=False)
+    corr_chart = chart_div(app._rolling_corr_chart(HIST_START_D, MAX_D))
     corr_note = f'<p class="caption">{app.CORR_NOTE}</p>'
     tab_corr = period_scope("1Y", grid(3, [corr_chart]) + corr_note)  # 차트는 항상 3열 그리드 기준 - 1열
 
@@ -349,9 +336,9 @@ def render_main() -> str:
                       grid(2, [df_to_html(tbl), df_to_html(stt)]))
     tab_corr += ('<details style="margin-top:12px;"><summary style="cursor:pointer;font-weight:600;">'
                  f'검증: 최근 {app.CORR_WINDOW}영업일 입력 데이터와 상관계수 계산</summary>' + "".join(checks) + '</details>')
-    key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D), thin=False)
-    rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D), thin=False)
-    key_chart_30 = chart_div(app._main_key_chart(HIST_START_D, MAX_D, "30Y", "10Y"), thin=False)
+    key_chart = chart_div(app._main_key_chart(HIST_START_D, MAX_D))
+    rate_chart = chart_div(app._main_rate_chart(HIST_START_D, MAX_D))
+    key_chart_30 = chart_div(app._main_key_chart(HIST_START_D, MAX_D, "30Y", "10Y"))
     tab_key = period_scope("1Y", key_chart +  # 사용자 요청: 주요 차트 탭의 차트는 가로 전체 폭(3열 꽉 채움), 기간 버튼은 공통
                            '<p class="caption">국고채 10년 - 3년 금리 스프레드(좌, bp)와 한국은행 기준금리(우, %).</p>'
                            '<div style="height:24px"></div>' + rate_chart +
@@ -806,6 +793,12 @@ function presetRange(preset) {
   return [start, end];
 }
 
+function axisTimes(x) {
+  // 날짜 문자열 -> 시각 변환은 축(배열)마다 한 번만 - 같은 축을 여러 trace/차트가 공유한다
+  if (!x.__t) x.__t = x.map(function(v){ return new Date(v).getTime(); });
+  return x.__t;
+}
+
 function rescaleY(gd, start, end) {
   // 기간 버튼으로 x축을 바꿔도 Plotly는 y축을 그대로 두는게 기본 동작이라(전체 데이터
   // 기준으로 고정) 확대할수록 위아래 여백만 늘어남 - 보이는 x범위 안의 값만으로
@@ -831,8 +824,9 @@ function rescaleY(gd, start, end) {
     if (!trace.x || !trace.y) return;
     var ax = (trace.yaxis === 'y2') ? 'yaxis2' : 'yaxis';
     if (!ranges[ax]) ranges[ax] = [Infinity, -Infinity];
-    for (var i = 0; i < trace.x.length; i++) {
-      var xv = new Date(trace.x[i]).getTime();
+    var times = axisTimes(trace.x);
+    for (var i = 0; i < times.length; i++) {
+      var xv = times[i];
       if (xv >= t0 && xv <= t1) {
         var yv = trace.y[i];
         if (typeof yv === 'number' && !isNaN(yv)) {
@@ -865,14 +859,14 @@ function scopeCharts(scopeId) {
 }
 
 function applyRange(el, start, end) {
+  if (!el.__chart) return;  // 아직 안 그린 차트는 그릴 때 스코프의 현재 기간을 적용한다
   if (el.getAttribute('data-scatter') === '1') renderScatter(el, start, end);
   else if (el.data) rescaleY(el, start, end);
 }
 
 function renderScatter(el, start, end) {
   // 산점도: 선택 기간의 점만 다시 그리고(회색), 회귀선(최소제곱)과 마지막 점(빨간 삼각형, 현재)을 새로 계산
-  var P = el.__pts;
-  if (!P) P = el.__pts = JSON.parse(document.getElementById(el.id + '-pts').textContent);
+  var P = el.__chart.pts;
   var t0 = start.getTime(), t1 = end.getTime();
   var xs = [], ys = [], ds = [];
   for (var i = 0; i < P.d.length; i++) {
@@ -904,12 +898,18 @@ function renderScatter(el, start, end) {
   traces.push({type: 'scatter', mode: 'markers', x: [xs[n-1]], y: [ys[n-1]],
                marker: {color: 'red', size: 14, symbol: 'triangle-up', line: {width: 1, color: 'black'}},
                name: '현재 (' + ds[n-1] + ')'});
-  var layout = JSON.parse(document.getElementById(el.id + '-data').textContent).layout;
+  var layout = JSON.parse(JSON.stringify(el.__chart.layout));
   Plotly.react(el, traces, layout, {displaylogo: false, responsive: true});
+}
+
+function setScopeRange(scopeId, r) {
+  var scope = document.querySelector('.period-scope[data-scope="' + scopeId + '"]');
+  if (scope) scope.__range = r;
 }
 
 function applyPeriod(scopeId, preset, btn) {
   var r = presetRange(preset);
+  setScopeRange(scopeId, r);
   scopeCharts(scopeId).forEach(function(el){ applyRange(el, r[0], r[1]); });
   var bar = document.querySelector('.period-bar[data-scope="' + scopeId + '"]');
   bar.querySelectorAll('button').forEach(function(b){ b.classList.remove('active'); });
@@ -931,6 +931,7 @@ function applyCustomRange(scopeId) {
   var e = document.getElementById(scopeId + '-end').value;
   if (!s || !e) return;
   var start = new Date(s), end = new Date(e);
+  setScopeRange(scopeId, [start, end]);
   scopeCharts(scopeId).forEach(function(el){ applyRange(el, start, end); });
 }
 
@@ -945,7 +946,7 @@ function initScopes() {
 
 function resizeCharts(root) {
   root.querySelectorAll('.plotly-chart').forEach(function(el){
-    if (window.Plotly && el.data) window.Plotly.Plots.resize(el);
+    if (window.Plotly && el.__chart) window.Plotly.Plots.resize(el);
   });
 }
 function showPage(id) {
@@ -958,6 +959,7 @@ function showPage(id) {
   var sb = document.getElementById('sidebar');
   if (sb.classList.contains('open')) sb.classList.remove('open');
   history.replaceState(null, '', '#' + id);
+  loadPage(id);
   // display:none 상태에서 Plotly.newPlot이 실행된 차트는 크기가 0으로 잡혀서
   // 페이지가 실제로 보이게 된 지금 다시 리사이즈 해줘야 함 (탭 전환도 showTab에서 동일 처리).
   setTimeout(function(){ resizeCharts(page.querySelector('.tab-panel.active') || page); }, 0);
@@ -970,19 +972,59 @@ function showTab(groupId, idx) {
   panels.forEach(function(p, i){ p.classList.toggle('active', i === idx); });
   setTimeout(function(){ resizeCharts(panels[idx]); }, 0);
 }
-function renderChart(id) {
-  var text = document.getElementById(id + '-data').textContent;
-  var gd = document.getElementById(id);
-  // Plotly.newPlot에 넘기는 data는 Plotly.js가 내부적으로 값을 바꿔치기(bdata 압축)할 수
-  // 있어서, rescaleY가 나중에 참조할 원본은 완전히 별개의 복사본으로 따로 파싱해둔다.
-  gd.__rawData = JSON.parse(text).data;
-  var payload = JSON.parse(text);
-  Plotly.newPlot(gd, payload.data, payload.layout, {displaylogo:false, responsive:true});
+var PAGE_DATA = {}, PAGE_LOADING = {}, chartObserver = null;
+function __addPageData(key, d) { PAGE_DATA[key] = d; }
+function loadPage(key) {
+  // 페이지를 처음 열 때 그 페이지의 차트 데이터 파일만 받아온다(<script> 방식이라 로컬 파일로 열어도 동작)
+  if (PAGE_DATA[key]) { observePage(key); return; }
+  if (PAGE_LOADING[key]) return;
+  PAGE_LOADING[key] = true;
+  var page = document.getElementById('page-' + key);
+  var msg = document.createElement('p');
+  msg.className = 'caption';
+  msg.textContent = '차트 데이터를 불러오는 중...';
+  page.insertBefore(msg, page.children[1] || null);
+  var s = document.createElement('script');
+  s.src = 'chartdata/' + key + '.js?v=__VERSION__';
+  s.onload = function(){ msg.remove(); observePage(key); };
+  s.onerror = function(){ PAGE_LOADING[key] = false; msg.textContent = '차트 데이터를 불러오지 못했습니다. 새로고침 해주세요.'; };
+  document.head.appendChild(s);
+}
+function observePage(key) {
+  document.getElementById('page-' + key).querySelectorAll('.plotly-chart').forEach(function(el){
+    if (el.__chart) return;
+    el.__page = key;
+    if (chartObserver) chartObserver.observe(el); else renderChart(el);
+  });
+}
+function renderChart(el) {
+  if (el.__chart || !window.Plotly) return;
+  var page = PAGE_DATA[el.__page], chart = page.charts[el.id];
+  var raw = chart.data.map(function(t){
+    var c = Object.assign({}, t);
+    if (c.x && c.x.$x !== undefined) c.x = page.axes[c.x.$x];
+    return c;
+  });
+  el.__chart = chart;
+  el.__rawData = raw;  // Plotly 가 trace 객체를 바꿔치기할 수 있어 rescaleY 용 원본은 따로 보관
+  var layout = JSON.parse(JSON.stringify(chart.layout));
+  Plotly.newPlot(el, raw.map(function(t){ return Object.assign({}, t); }), layout, {displaylogo:false, responsive:true})
+    .then(function(){
+      var scope = el.closest('.period-scope');
+      var ranged = el.getAttribute('data-ts') === '1' || el.getAttribute('data-scatter') === '1';
+      if (ranged && scope && scope.__range) applyRange(el, scope.__range[0], scope.__range[1]);
+    });
 }
 document.addEventListener('DOMContentLoaded', function() {
-  // 모든 period-scope의 기본 기간을 한 번에 적용(보이지 않는 탭/페이지 것도 포함 -
-  // Plotly relayout은 숨겨진 요소에도 정상 반영되고, 실제로 보일 때 resize만 해주면 됨).
-  setTimeout(initScopes, 50);
+  // 모든 period-scope의 기본 기간을 먼저 기록해 두고, 각 차트는 화면에 들어올 때 그 기간으로 그린다.
+  if (window.IntersectionObserver) {
+    chartObserver = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) { chartObserver.unobserve(e.target); renderChart(e.target); }
+      });
+    }, {rootMargin: '600px 0px'});
+  }
+  initScopes();
   var hash = location.hash.replace('#', '');
   var valid = document.getElementById('page-' + hash);
   showPage(valid ? hash : 'main');
@@ -990,16 +1032,20 @@ document.addEventListener('DOMContentLoaded', function() {
 """
 
 
-def build() -> str:
+def build() -> tuple[str, dict]:
     nav_links = "".join(
         f'<a href="#{key}" id="nav-{key}" onclick="showPage(\'{key}\');return false;">'
         f'<span>{icon}</span><span>{label}</span></a>'
         for key, icon, label, _ in PAGES
     )
     page_divs = []
+    data_files = {}
     for key, icon, label, render_fn in PAGES:
         print(f"  - {label} 생성 중...", flush=True)
+        _reset_page_data()
         content = render_fn()
+        payload = json.dumps(_page_data, separators=(",", ":"), default=str)
+        data_files[key] = f'__addPageData("{key}",{payload});'
         page_divs.append(
             f'<div class="page" id="page-{key}">'
             f'<h1>{icon} {label}</h1>'
@@ -1008,6 +1054,7 @@ def build() -> str:
         )
     generated_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
     js = JS.replace("__HIST_START__", str(HIST_START_D)).replace("__MAX_D__", str(MAX_D))
+    js = js.replace("__VERSION__", pd.Timestamp.now().strftime("%Y%m%d%H%M%S"))
     return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -1030,7 +1077,7 @@ def build() -> str:
   </main>
 </div>
 </body>
-</html>"""
+</html>""", data_files
 
 
 def main():
@@ -1042,11 +1089,20 @@ def main():
         shutil.copy(src_img, out_dir / "assets" / "trilemma_diagram.png")
 
     print("정적 사이트 생성 시작...")
-    html = build()
-    (out_dir / "index.html").write_text(html, encoding="utf-8")
+    html, data_files = build()
+    files = {out_dir / "index.html": html}
+    files.update({out_dir / "chartdata" / f"{k}.js": v for k, v in data_files.items()})
+    sizes = {path: len(text.encode("utf-8")) / 1024 / 1024 for path, text in files.items()}
+    for path, mb in sizes.items():
+        print(f"    {path.name}: {mb:.1f} MB")
+    too_big = [f"{p.name} {mb:.1f}MB" for p, mb in sizes.items() if mb > MAX_FILE_MB]
+    if too_big:  # 아무 파일도 덮어쓰기 전에 중단
+        raise SystemExit(f"파일이 너무 큽니다(한도 {MAX_FILE_MB}MB): {too_big}")
+    (out_dir / "chartdata").mkdir(exist_ok=True)
+    for path, text in files.items():
+        path.write_text(text, encoding="utf-8")
     (out_dir / ".nojekyll").write_text("", encoding="utf-8")
-    size_mb = len(html.encode("utf-8")) / 1024 / 1024
-    print(f"완료: {out_dir / 'index.html'} ({size_mb:.1f} MB)")
+    print(f"완료: {out_dir / 'index.html'} (전체 {sum(sizes.values()):.1f} MB, 최대 파일 {max(sizes.values()):.1f} MB)")
 
 
 if __name__ == "__main__":

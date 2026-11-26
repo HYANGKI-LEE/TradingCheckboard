@@ -6,7 +6,7 @@ logs/done_YYYYMMDD 표식을 남기고, 표식이 있으면 (--force 가 아닌 
   1. RawData_master.xlsx 업데이트: 인포맥스 IMDH 재조회(refresh_master.ps1) 후
      "전 영업일 날짜"가 시트별로 채워졌는지 확인 -> 통과해야 마스터를 교체
   2. market.db 업데이트: 마스터의 값을 DB에 반영 (엑셀 값이 있는 칸만 덮어쓰고 없는 날짜는 추가)
-  3. 배포: market_recent.db(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(docs/index.html)도
+  3. 배포: market_recent.db(기준일 이후분, 수 MB 이하)를 다시 만들고 GitHub Pages 정적 사이트(docs/index.html + docs/chartdata)도
      DB 기준으로 다시 생성해서 GitHub 에 푸시 -> Streamlit Cloud 재배포 + Pages 갱신
      (과거분 market_history.db 는 거의 안 바뀌어서 매일 올리지 않음. 배포 실패는 경고만 하고 업데이트 자체는 성공 처리)
 
@@ -17,7 +17,7 @@ logs/done_YYYYMMDD 표식을 남기고, 표식이 있으면 (--force 가 아닌 
   --force       주말에도 실행
   --skip-excel  엑셀 재조회 없이 현재 마스터로 확인 + DB 업데이트만 (수동 갱신 후 사용)
   --no-push     GitHub 푸시 생략 (로컬 DB 업데이트만)
-  --no-static   정적 사이트(docs/index.html) 재생성 생략
+  --no-static   정적 사이트(docs/) 재생성 생략
 """
 
 import argparse
@@ -244,7 +244,7 @@ def publish(today, with_static=True):
     if with_static:
         try:
             build_static_site()
-            files.append("docs/index.html")
+            files += ["docs/index.html", "docs/chartdata"]
         except Exception as e:  # noqa: BLE001 - 정적 사이트 실패해도 recent DB 배포는 계속
             log(f"WARNING: {e}")
     _git("add", *files)
