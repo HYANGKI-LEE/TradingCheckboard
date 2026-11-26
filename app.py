@@ -1461,6 +1461,32 @@ def _render_irs_forward_table(rows: list) -> str:
 
 
 # ================================================================ IRS (Par/스프레드/Zero/Fwd/버터플라이)
+# IRS > 스프레드 맨 위 차트에 항상 함께 그리는 스프레드 (장기, 단기, 색)
+IRS_FIXED_SPREADS = [("2Y", "1Y", "#E67E22"), ("3Y", "2Y", "#27AE60"), ("10Y", "3Y", "#C0392B")]
+
+
+def _irs_base_spread_chart(tenor_a: str, tenor_b: str, start_date, end_date):
+    """선택한 IRS 스프레드(tenor_a - tenor_b) + 고정 스프레드(좌, bp)와 기준금리(우, %)."""
+    fig = go.Figure()
+    lines = [(tenor_a, tenor_b, "#2980B9", 2.5)] if tenor_a != tenor_b else []
+    lines += [(a, b, color, 1.5) for a, b, color in IRS_FIXED_SPREADS if (a, b) != (tenor_a, tenor_b)]
+    available = set(df.loc[df["그룹"] == "IRS", "만기"].dropna().astype(str).unique())
+    for a, b, color, width in lines:
+        if a not in available or b not in available:
+            continue
+        view = _tenor_spread_view("IRS", a, b, start_date, end_date)
+        fig.add_trace(go.Scatter(x=view["날짜"], y=view["값"], mode="lines", name=f"IRS {a}-{b}",
+                                  line=dict(color=color, width=width)))
+    base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
+    base_rate = base_rate[(base_rate["날짜"].dt.date >= start_date) & (base_rate["날짜"].dt.date <= end_date)]
+    fig.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["값"], mode="lines", name="기준금리 (우)",
+                              line=dict(color="gray", shape="hv", width=2), yaxis="y2"))
+    fig.update_layout(height=420, yaxis=dict(title="bp"),
+                      yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
+                      legend=dict(orientation="h", y=-0.15), margin=dict(t=40))
+    return fig
+
+
 def page_irs_detail():
     irs_dates = df.loc[df["그룹"] == "IRS", "날짜"]
     min_date, max_date = irs_dates.min().date(), irs_dates.max().date()
@@ -1524,21 +1550,10 @@ def page_irs_detail():
                                     index=tenor_options.index("1Y") if "1Y" in tenor_options else 0,
                                     key="irs_custom_b")
 
-        base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
-        base_rate = base_rate[(base_rate["날짜"].dt.date >= start_date) & (base_rate["날짜"].dt.date <= end_date)]
-        fig_base = go.Figure()
-        if tenor_a != tenor_b:
-            custom_view = _tenor_spread_view("IRS", tenor_a, tenor_b, start_date, end_date)
-            fig_base.add_trace(go.Scatter(x=custom_view["날짜"], y=custom_view["값"], mode="lines",
-                                           name=f"IRS {tenor_a}-{tenor_b}", line=dict(color="#2980B9", width=2.5)))
-        else:
-            st.caption("서로 다른 만기 2개를 선택해주세요.")
-        fig_base.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["값"], mode="lines", name="기준금리",
-                                       line=dict(color="gray", shape="hv", width=2), yaxis="y2"))
-        fig_base.update_layout(height=320, yaxis=dict(title="bp"),
-                                yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
-                                legend=dict(orientation="h", y=-0.2), margin=dict(t=20))
-        st.plotly_chart(fig_base, use_container_width=True, key="irs_spread_base_rate")
+        if tenor_a == tenor_b:
+            st.caption("선택 스프레드를 보려면 서로 다른 만기 2개를 선택해주세요.")
+        st.plotly_chart(_irs_base_spread_chart(tenor_a, tenor_b, start_date, end_date),
+                        use_container_width=True, key="irs_spread_base_rate")
 
         _chart_gap()
         cols = st.columns(3)

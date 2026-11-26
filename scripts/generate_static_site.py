@@ -495,20 +495,8 @@ def render_irs() -> str:
     tab_zero = curve_tab("Zero rate", "IRS_ZERO")
     tab_fwd_rate = curve_tab("Fwd rate", "IRS_FWD3M")
 
-    import plotly.graph_objects as go
     tenor_a, tenor_b = "3Y", "1Y"
-    base_rate = df[df["그룹"] == "기준금리"][["날짜", "값"]].sort_values("날짜")
-    base_rate = base_rate[(base_rate["날짜"].dt.date >= HIST_START_D) & (base_rate["날짜"].dt.date <= MAX_D)]
-    fig_base = go.Figure()
-    custom_view = app._tenor_spread_view("IRS", tenor_a, tenor_b, HIST_START_D, MAX_D)
-    fig_base.add_trace(go.Scatter(x=custom_view["날짜"], y=custom_view["값"], mode="lines",
-                                   name=f"IRS {tenor_a}-{tenor_b}", line=dict(color="#2980B9", width=2.5)))
-    fig_base.add_trace(go.Scatter(x=base_rate["날짜"], y=base_rate["값"], mode="lines", name="기준금리",
-                                   line=dict(color="gray", shape="hv", width=2), yaxis="y2"))
-    fig_base.update_layout(height=320, yaxis=dict(title="bp"),
-                            yaxis2=dict(title="기준금리(%)", overlaying="y", side="right"),
-                            legend=dict(orientation="h", y=-0.2), margin=dict(t=40))
-    custom_chart = chart_div(fig_base)
+    custom_chart = chart_div(app._irs_base_spread_chart(tenor_a, tenor_b, HIST_START_D, MAX_D))
 
     spread_cells = []
     for long_t, short_t in app.IRS_SPREAD_PAIRS:
